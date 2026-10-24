@@ -1,6 +1,7 @@
 //! Laço principal: overlay em layer-shell (Wayland), timer, bandeja, socket e bloqueio.
 
 use std::os::unix::net::UnixListener;
+use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant, SystemTime};
 
 use smithay_client_toolkit::{
@@ -130,6 +131,7 @@ pub struct App {
     stats: Stats,
     blocker: Blocker,
     warned_block_missing: bool,
+    tx: channel::Sender<Msg>,
     tray: Option<ksni::blocking::Handle<FocoTray>>,
     tray_snap: Snap,
     tick: Option<RegistrationToken>,
@@ -161,7 +163,8 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
             app.on_msg(msg);
         }
     })?;
-    lh.insert_source(Signals::new(&[Signal::SIGTERM, Signal::SIGINT, Signal::SIGHUP])?, |_, _, app| {
+    lh.insert_source(Signals::new(&[Signal::SIGTERM, Signal::SIGINT, Signal::SIGHUP])?, |ev, _, app| {
+        config::log(&format!("encerrando: sinal {:?}", ev.signal()));
         app.exit = true;
     })?;
 
@@ -193,6 +196,7 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
         stats: Stats::load(),
         blocker,
         warned_block_missing: false,
+        tx,
         tray: None,
         tray_snap: Snap::default(),
         tick: None,
@@ -207,22 +211,21 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
     queue.roundtrip(&mut app)?;
     WaylandSource::new(conn, queue).insert(lh)?;
 
-    use ksni::blocking::TrayMethods;
-    let snap = app.snapshot();
-    match (FocoTray { snap: snap.clone(), tx }).spawn() {
-        Ok(handle) => {
-            app.tray = Some(handle);
-            app.tray_snap = snap;
-        }
-        Err(e) => eprintln!("foco: sem ícone na bandeja ({e})"),
-    }
-
+    app.sync_tray();
     app.startup();
-    while !app.exit {
-        event_loop.dispatch(None, &mut app)?;
-    }
+    // um erro ou pânico no laço não pode deixar sites bloqueados nem o socket para trás
+    let result: Result<(), Box<dyn std::error::Error>> = loop {
+        if app.exit {
+            break Ok(());
+        }
+        match std::panic::catch_unwind(AssertUnwindSafe(|| event_loop.dispatch(None, &mut app))) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => break Err(e.into()),
+            Err(_) => break Err("pânico no laço principal".into()),
+        }
+    };
     app.shutdown();
-    Ok(())
+    result
 }
 
 impl App {
@@ -325,6 +328,7 @@ impl App {
             }
             Cmd::Status => return Ok(self.status_json()),
             Cmd::Quit => {
+                config::log("encerrando: comando quit");
                 self.exit = true;
                 return Ok(ok);
             }
@@ -352,6 +356,7 @@ impl App {
         let t = &self.p.timer;
         let rem = t.remaining_ms(now, &self.cfg);
         let (count, minutes) = self.stats.today();
+        let [r, g, b] = self.phase_color(t.phase);
         serde_json::json!({
             "ok": true,
             "phase": t.phase.key(),
@@ -363,6 +368,7 @@ impl App {
             "done_in_cycle": t.done_in_cycle,
             "every": self.cfg.long_break_every,
             "strict_locked": t.strict_locked(&self.cfg),
+            "color": format!("#{r:02x}{g:02x}{b:02x}"),
             "blocking": self.blocker.active(),
             "blocked_sites": self.blocker.applied(),
             "block_installed": blocker::installed(),
@@ -386,6 +392,7 @@ impl App {
             ov.layer.set_layer(self.layer_kind());
             ov.layer.commit();
         }
+        self.sync_tray();
     }
 
     fn open_settings(&self) {
@@ -537,6 +544,28 @@ impl App {
             outputs: self.output_names(),
             output: self.ov.as_ref().map(|o| o.output_name.clone()).unwrap_or_else(|| self.p.ui.output.clone()),
             blocking: self.blocker.active(),
+        }
+    }
+
+    /// Cria ou tira o ícone da bandeja conforme a configuração.
+    fn sync_tray(&mut self) {
+        use ksni::blocking::TrayMethods;
+        if !self.cfg.appearance.tray_icon {
+            if let Some(t) = self.tray.take() {
+                t.shutdown().wait();
+            }
+            return;
+        }
+        if self.tray.is_some() {
+            return;
+        }
+        let snap = self.snapshot();
+        match (FocoTray { snap: snap.clone(), tx: self.tx.clone() }).spawn() {
+            Ok(handle) => {
+                self.tray = Some(handle);
+                self.tray_snap = snap;
+            }
+            Err(e) => eprintln!("foco: sem ícone na bandeja ({e})"),
         }
     }
 

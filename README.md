@@ -9,7 +9,9 @@ cima de tudo, um ícone na bandeja e bloqueio de sites durante o foco.
   - clique para iniciar/pausar · passe o mouse para ver reiniciar / iniciar-pausar / pular
   - botão direito abre as configurações
   - opção de travar (os cliques atravessam) e de escolher o monitor
-- **Bandeja**: anel de progresso com os minutos que faltam e um menu com tudo.
+- **Miniaplicativo do painel**: anel de progresso e o tempo que falta no painel do COSMIC; o
+  clique abre os controles (iniciar/pausar, pular, etapas, overlay, configurações).
+- **Bandeja** (opcional, desligável em Aparência → Painel): o mesmo anel, com um menu.
 - **Bloqueio de sites** durante o foco, em qualquer navegador. Nas pausas tudo volta.
   Abas que já estavam abertas são cortadas na hora.
 - **Modo rígido**: durante o foco não dá para pausar, pular nem liberar sites.
@@ -23,6 +25,10 @@ cima de tudo, um ícone na bandeja e bloqueio de sites durante o foco.
 
 Compila (precisa de `cargo`), instala em `~/.local/bin`, cria o atalho no menu de aplicativos
 e o início automático, e já abre o Foco. Não precisa de root.
+
+O miniaplicativo (`applet/`, feito com o libcosmic) leva alguns minutos para compilar na primeira
+vez. Para pô-lo no painel: Configurações do COSMIC → Área de trabalho → Painel → Miniaplicativos →
+Adicionar → **Foco**. Ele só mostra e controla: o timer continua no daemon `foco`.
 
 O **bloqueio de sites** precisa de um helper root, instalado uma vez: abra as configurações
 (botão direito no círculo, ou `foco settings`) → **Bloqueio** → **Instalar**. A senha é pedida
@@ -61,6 +67,7 @@ configurado à mão num navegador podem passar por cima.
 | `~/.config/foco/config.json` | preferências (quem escreve é a tela de configurações) |
 | `~/.local/state/foco/state.json` | timer e posição do overlay (quem escreve é o daemon) |
 | `~/.local/share/foco/history.jsonl` | focos concluídos |
+| `~/.local/state/foco/foco.log` | início, fim e erros do daemon |
 | `$XDG_RUNTIME_DIR/foco.sock` | socket de controle |
 
 ## Desinstalar
@@ -73,6 +80,7 @@ configurado à mão num navegador podem passar por cima.
 
 - `src/` — daemon em Rust: `app.rs` (laço, overlay Wayland, mouse), `render.rs` (desenho com
   tiny-skia), `tray.rs` (StatusNotifierItem), `timer.rs`, `blocker.rs`, `ipc.rs`
+- `applet/` — miniaplicativo do painel (libcosmic), conversa com o daemon pelo socket
 - `settings/foco-settings.py` — configurações em GTK4 + libadwaita
 - `system/` — helper root, política do polkit e instalador do bloqueio
 

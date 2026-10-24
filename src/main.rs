@@ -100,10 +100,19 @@ fn daemon() -> i32 {
             return 1;
         }
     };
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        config::log(&format!("pânico: {info}"));
+        default_hook(info);
+    }));
+    config::log(concat!("iniciado (v", env!("CARGO_PKG_VERSION"), ")"));
     match app::run(listener) {
-        Ok(()) => 0,
+        Ok(()) => {
+            config::log("encerrado");
+            0
+        }
         Err(e) => {
-            eprintln!("foco: {e}");
+            config::log(&format!("encerrado por erro: {e}"));
             1
         }
     }

@@ -11,6 +11,24 @@ autostart="${XDG_CONFIG_HOME:-$HOME/.config}/autostart"
 echo "› compilando"
 cargo build --release --quiet
 
+# o miniaplicativo do painel usa o libcosmic; sem o libxkbcommon-dev instalado, um .pc
+# local apontando para a biblioteca do sistema basta para linkar
+applet_pc=""
+if ! pkg-config --exists xkbcommon 2>/dev/null; then
+    lib=$(cc -print-file-name=libxkbcommon.so.0)
+    if [[ -e "$lib" ]]; then
+        applet_pc="$PWD/applet/target/xkbcommon-shim"
+        mkdir -p "$applet_pc/lib"
+        ln -sf "$lib" "$applet_pc/lib/libxkbcommon.so"
+        printf '%s\n' 'libdir=${pcfiledir}/lib' 'Name: xkbcommon' 'Description: libxkbcommon' \
+            'Version: 1.0.0' 'Libs: -L${libdir} -lxkbcommon' 'Cflags:' >"$applet_pc/xkbcommon.pc"
+    fi
+fi
+echo "› compilando o miniaplicativo do painel (na primeira vez demora alguns minutos)"
+applet_ok=1
+(cd applet && PKG_CONFIG_PATH="$applet_pc${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" cargo build --release --quiet) ||
+    applet_ok=0
+
 echo "› instalando em $bin"
 "$bin/foco" quit >/dev/null 2>&1 || true
 install -Dm755 target/release/foco "$bin/foco"
@@ -19,6 +37,27 @@ install -Dm644 data/foco.svg "$share/icons/hicolor/scalable/apps/foco.svg"
 install -Dm755 system/foco-hosts "$share/foco/system/foco-hosts"
 install -Dm644 system/dev.foco.hosts.policy "$share/foco/system/dev.foco.hosts.policy"
 install -Dm755 system/install-bloqueio.sh "$share/foco/system/install-bloqueio.sh"
+if [[ $applet_ok == 1 ]]; then
+    install -Dm755 applet/target/release/foco-applet "$bin/foco-applet"
+    cat >"$share/applications/dev.foco.Applet.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Foco
+Comment=Pomodoro: tempo no painel, controles e bloqueio de sites
+Exec=$bin/foco-applet
+Icon=foco
+NoDisplay=true
+Categories=COSMIC;Utility;
+Keywords=COSMIC;Applet;Pomodoro;Foco;Timer;
+X-CosmicApplet=true
+X-CosmicHoverPopup=Auto
+X-HostWaylandDisplay=true
+EOF
+    # o painel reabre o applet já com o binário novo
+    pkill -x foco-applet 2>/dev/null || true
+else
+    echo "  (o miniaplicativo não compilou; o resto do Foco funciona sem ele)"
+fi
 
 desktop() {
     cat <<EOF
@@ -56,6 +95,11 @@ setsid "$bin/foco" >/dev/null 2>&1 < /dev/null &
 sleep 0.6
 "$bin/foco" status || true
 
+panels="${XDG_CONFIG_HOME:-$HOME/.config}/cosmic"
+if [[ $applet_ok == 1 ]] && ! grep -qs '"dev.foco.Applet"' "$panels"/com.system76.CosmicPanel.*/v1/plugins_*; then
+    echo
+    echo "Para ver o Foco no painel: Configurações do COSMIC → Área de trabalho → Painel → Miniaplicativos → Adicionar → Foco."
+fi
 if [[ ! -x /usr/local/libexec/foco-hosts ]]; then
     echo
     echo "Para bloquear sites: abra as configurações (foco settings) → Bloqueio → Instalar."

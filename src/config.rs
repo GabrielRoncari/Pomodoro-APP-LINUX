@@ -22,6 +22,43 @@ pub fn state_path() -> PathBuf {
     xdg("XDG_STATE_HOME", ".local/state").join("foco/state.json")
 }
 
+pub fn log_path() -> PathBuf {
+    xdg("XDG_STATE_HOME", ".local/state").join("foco/foco.log")
+}
+
+/// Registra no foco.log: o daemon roda sem terminal e o stderr se perde.
+pub fn log(msg: &str) {
+    use std::io::Write;
+    eprintln!("foco: {msg}");
+    let path = log_path();
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 256 * 1024) {
+        let _ = std::fs::rename(&path, path.with_extension("log.old"));
+    }
+    let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("/tmp")));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{} [{}] {msg}", local_time(), std::process::id());
+    }
+}
+
+fn local_time() -> String {
+    // SAFETY: time/localtime_r só leem e escrevem nas variáveis locais passadas.
+    let tm = unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm
+    };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec
+    )
+}
+
 pub fn history_path() -> PathBuf {
     xdg("XDG_DATA_HOME", ".local/share").join("foco/history.jsonl")
 }
@@ -73,6 +110,8 @@ pub struct Appearance {
     pub idle_opacity: f32,
     /// Camada overlay (fica por cima até de tela cheia) em vez de top.
     pub above_fullscreen: bool,
+    /// Ícone na bandeja do sistema (dispensável com o miniaplicativo no painel).
+    pub tray_icon: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -118,6 +157,7 @@ impl Default for Appearance {
             background_opacity: 0.86,
             idle_opacity: 0.94,
             above_fullscreen: true,
+            tray_icon: true,
         }
     }
 }

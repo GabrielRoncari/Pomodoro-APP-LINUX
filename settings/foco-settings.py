@@ -51,6 +51,7 @@ DEFAULTS = {
         "background_opacity": 0.86,
         "idle_opacity": 0.94,
         "above_fullscreen": True,
+        "tray_icon": True,
     },
     "block": {
         "enabled": True,
@@ -257,7 +258,14 @@ class FocoSettings(Adw.ApplicationWindow):
     def on_first_active(self, *_):
         if self.is_active() and not self._focus_cleared:
             self._focus_cleared = True
-            GLib.timeout_add(60, lambda: self.set_focus(None) or False)
+            GLib.timeout_add(60, self.clear_focus)
+
+    def clear_focus(self):
+        focus = self.get_focus()
+        if isinstance(focus, Gtk.Editable):
+            focus.select_region(0, 0)
+        self.set_focus(None)
+        return False
 
     # ---------- infraestrutura ----------
 
@@ -589,6 +597,13 @@ class FocoSettings(Adw.ApplicationWindow):
         ov.add(self.switch_row("Por cima de tela cheia", "Continua visível sobre vídeos e jogos em tela cheia.",
                                lambda: a["above_fullscreen"], lambda v: a.__setitem__("above_fullscreen", v)))
         page.add(ov)
+
+        panel = Adw.PreferencesGroup(title="Painel",
+                                     description="O miniaplicativo Foco fica em Configurações do COSMIC → "
+                                                 "Área de trabalho → Painel → Miniaplicativos.")
+        panel.add(self.switch_row("Ícone na bandeja do sistema", "Dispensável se o miniaplicativo estiver no painel.",
+                                  lambda: a["tray_icon"], lambda v: a.__setitem__("tray_icon", v)))
+        page.add(panel)
 
         tr = Adw.PreferencesGroup(title="Transparência")
         tr.add(self.scale_row("Fundo do círculo", None, 0, 100, 1, a["background_opacity"] * 100,
