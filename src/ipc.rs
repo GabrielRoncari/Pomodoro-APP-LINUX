@@ -162,14 +162,16 @@ pub fn client(args: &[String]) -> i32 {
                 Some("paused") => " (pausado)",
                 _ => " (parado)",
             };
+            let today = v["today"]["count"].as_u64().unwrap_or(0);
             println!(
-                "{} {}{} · ciclo {}/{} · hoje {} focos{}",
+                "{} {}{} · ciclo {}/{} · hoje {} {}{}",
                 v["phase_name"].as_str().unwrap_or("?"),
                 v["clock"].as_str().unwrap_or("?"),
                 state,
                 v["done_in_cycle"],
                 v["every"],
-                v["today"]["count"],
+                today,
+                if today == 1 { "foco" } else { "focos" },
                 if v["blocking"] == true { " · sites bloqueados" } else { "" },
             );
         }
