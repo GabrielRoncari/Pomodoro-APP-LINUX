@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>Foco</vendor>
+  <action id="dev.foco.hosts">
+    <description>Bloquear sites durante o foco</description>
+    <message>O Foco precisa alterar o /etc/hosts para bloquear sites durante o foco</message>
+    <icon_name>foco</icon_name>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/libexec/foco-hosts</annotate>
+  </action>
+</policyconfig>

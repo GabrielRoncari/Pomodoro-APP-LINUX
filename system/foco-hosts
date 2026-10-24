@@ -1,0 +1,187 @@
+#!/usr/bin/python3 -I
+"""Helper root do Foco: escreve ou remove o bloco de sites bloqueados no /etc/hosts.
+
+Roda via pkexec (a política dev.foco.hosts libera a sessão ativa sem senha). Só mexe
+no próprio bloco marcado e só aceita nomes de domínio válidos.
+
+    foco-hosts block [--kill] < sites   (um domínio por linha)
+    foco-hosts clear
+    foco-hosts status
+"""
+
+import ipaddress
+import os
+import re
+import socket
+import subprocess
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor, wait
+
+HOSTS = "/etc/hosts"
+BEGIN = "# >>> foco: sites bloqueados durante o foco (gerado automaticamente) >>>"
+END = "# <<< foco <<<"
+TAG = "# foco-sites:"
+LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+MAX_SITES = 500
+VARIANTS = ("", "www.", "m.")
+
+
+def valid(domain):
+    labels = domain.split(".")
+    return (
+        len(domain) <= 253
+        and len(labels) >= 2
+        and all(LABEL.match(label) for label in labels)
+        and not labels[-1].isdigit()
+    )
+
+
+def read_sites():
+    sites = []
+    for line in sys.stdin.read(256 * 1024).splitlines():
+        d = line.strip().lower().rstrip(".")
+        if d.startswith("www."):
+            d = d[4:]
+        if valid(d) and d not in sites:
+            sites.append(d)
+        elif d:
+            print(f"ignorado: {d!r}", file=sys.stderr)
+        if len(sites) >= MAX_SITES:
+            break
+    return sites
+
+
+def strip_block(text):
+    if BEGIN not in text:
+        return text
+    out, skipping = [], False
+    for line in text.splitlines():
+        if line.strip() == BEGIN:
+            skipping = True
+        elif skipping and line.strip() == END:
+            skipping = False
+        elif not skipping:
+            out.append(line)
+    while out and not out[-1].strip():
+        out.pop()
+    return "\n".join(out) + "\n"
+
+
+def write_hosts(content):
+    target = os.path.realpath(HOSTS)
+    st = os.stat(target)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(target), prefix=".hosts.foco.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, st.st_mode & 0o7777)
+        os.chown(tmp, st.st_uid, st.st_gid)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def resolve(names):
+    """IPs atuais dos nomes (antes de bloquear), para derrubar conexões abertas."""
+
+    def lookup(name):
+        try:
+            return {ai[4][0] for ai in socket.getaddrinfo(name, 443, proto=socket.IPPROTO_TCP)}
+        except OSError:
+            return set()
+
+    ips = set()
+    pool = ThreadPoolExecutor(max_workers=16)
+    futures = [pool.submit(lookup, n) for n in names]
+    done, _ = wait(futures, timeout=3)
+    pool.shutdown(wait=False, cancel_futures=True)
+    for f in done:
+        ips |= f.result()
+    keep = set()
+    for ip in ips:
+        try:
+            addr = ipaddress.ip_address(ip.split("%")[0])
+        except ValueError:
+            continue
+        if not (addr.is_loopback or addr.is_unspecified or addr.is_private or addr.is_link_local):
+            keep.add(str(addr))
+    return sorted(keep)
+
+
+def kill_connections(ips):
+    """Fecha sockets TCP/UDP conectados a esses IPs (abas abertas param de carregar)."""
+    for i in range(0, len(ips), 40):
+        expr = ["("]
+        for j, ip in enumerate(ips[i : i + 40]):
+            if j:
+                expr.append("or")
+            expr += ["dst", f"[{ip}]" if ":" in ip else ip]
+        expr.append(")")
+        subprocess.run(
+            ["ss", "-K", "-t", "-u", *expr],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+
+
+def current_sites(text):
+    for line in text.splitlines():
+        if line.startswith(TAG):
+            return line[len(TAG) :].split()
+    return None
+
+
+def main(argv):
+    if os.geteuid() != 0:
+        print("precisa rodar como root (via pkexec)", file=sys.stderr)
+        return 1
+    cmd = argv[1] if len(argv) > 1 else ""
+    with open(HOSTS) as f:
+        text = f.read()
+    base = strip_block(text)
+
+    if cmd == "block":
+        sites = read_sites()
+        if not sites:
+            if base != text:
+                write_hosts(base)
+            return 0
+        names = [v + s for s in sites for v in VARIANTS]
+        ips = resolve(names) if "--kill" in argv[2:] else []
+        block = [BEGIN, f"{TAG} {' '.join(sites)}"]
+        for n in names:
+            block.append(f"0.0.0.0 {n}")
+            block.append(f":: {n}")
+        block.append(END)
+        new = base.rstrip("\n") + "\n\n" + "\n".join(block) + "\n"
+        if new != text:
+            write_hosts(new)
+        if ips:
+            kill_connections(ips)
+        return 0
+
+    if cmd == "clear":
+        if base != text:
+            write_hosts(base)
+        return 0
+
+    if cmd == "status":
+        sites = current_sites(text)
+        print("sem bloqueio" if sites is None else " ".join(sites))
+        return 0
+
+    print(__doc__.strip(), file=sys.stderr)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
