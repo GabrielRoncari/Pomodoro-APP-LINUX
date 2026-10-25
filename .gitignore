@@ -1,3 +1,4 @@
 /target
 /applet/target
 __pycache__/
+/dist

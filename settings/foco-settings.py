@@ -17,14 +17,17 @@ import sys
 import time
 from pathlib import Path
 
-import gi
+try:
+    import gi
 
-gi.require_version("Gtk", "4.0")
-gi.require_version("Gsk", "4.0")
-gi.require_version("Graphene", "1.0")
-gi.require_version("Adw", "1")
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk, Gtk  # noqa: E402
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gsk", "4.0")
+    gi.require_version("Graphene", "1.0")
+    gi.require_version("Adw", "1")
+    gi.require_version("GdkPixbuf", "2.0")
+    from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Graphene, Gsk, Gtk
+except (ImportError, ValueError) as e:
+    sys.exit(f"foco-settings: faltam o GTK 4 e a libadwaita para Python ({e}). Rode o install.sh de novo.")
 
 HOME = Path.home()
 
@@ -85,6 +88,45 @@ PRESETS = [
 ]
 
 PHASES = [("focus", "Foco"), ("short_break", "Pausa curta"), ("long_break", "Pausa longa")]
+
+DESKTOP = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+
+# onde criar um atalho de teclado em cada desktop
+SHORTCUTS = [
+    ("COSMIC", "Em Configurações → Teclado → Atalhos personalizados, crie um atalho com o comando"),
+    ("GNOME", "Em Configurações → Teclado → Atalhos de teclado → Atalhos personalizados, crie um atalho com o comando"),
+    ("KDE", "Em Configurações do sistema → Teclado → Atalhos → Adicionar novo → Comando, use o comando"),
+    ("XFCE", "Em Configurações → Teclado → Atalhos de aplicativos, adicione o comando"),
+    ("X-CINNAMON", "Em Configurações do sistema → Teclado → Atalhos → Atalhos personalizados, use o comando"),
+    ("MATE", "Em Centro de controle → Atalhos de teclado, adicione o comando"),
+    ("HYPRLAND", "No hyprland.conf, por exemplo: bind = SUPER, P, exec,"),
+    ("SWAY", "No config do sway, por exemplo: bindsym $mod+p exec"),
+]
+
+
+def shortcut_hint():
+    where = next((text for key, text in SHORTCUTS if key in DESKTOP),
+                 "Nas configurações de teclado do seu sistema, crie um atalho com o comando")
+    return f"{where} “foco toggle” (inicia/pausa). Também existem foco skip, foco show e foco hide."
+
+
+def autostart_hint():
+    # esses compositores não leem ~/.config/autostart sozinhos
+    if "HYPRLAND" in DESKTOP:
+        return "Liga o Foco quando você entra na sessão. No Hyprland, ponha também exec-once = foco no hyprland.conf."
+    if "SWAY" in DESKTOP:
+        return "Liga o Foco quando você entra na sessão. No Sway, ponha também exec foco no config."
+    return "Liga o Foco quando você entra na sessão."
+
+
+def too_old():
+    """A central usa GTK 4.14 (caminhos do Gsk) e libadwaita 1.4 (SpinRow, SwitchRow)."""
+    gtk = (Gtk.get_major_version(), Gtk.get_minor_version())
+    adw = (Adw.get_major_version(), Adw.get_minor_version())
+    if gtk < (4, 14) or adw < (1, 4):
+        return (f"A central do Foco precisa do GTK 4.14 e da libadwaita 1.4 ou mais novos; aqui há o GTK "
+                f"{gtk[0]}.{gtk[1]} e a libadwaita {adw[0]}.{adw[1]}. O timer funciona, mas sem a central.")
+    return None
 
 # página: (título, ícone)
 PAGES = {
@@ -1234,7 +1276,7 @@ class Central(Adw.ApplicationWindow):
         self.visible_row.connect("notify::active", self.on_visible)
         ov.add(self.visible_row)
         self.lock_row = Adw.SwitchRow(title="Travar posição",
-                                      subtitle="Os cliques atravessam o overlay; abra esta janela pela bandeja.")
+                                      subtitle="Os cliques atravessam o overlay; abra esta janela pelo menu de aplicativos.")
         self.lock_row.connect("notify::active", lambda r, _: self._syncing or ipc(f"lock {'on' if r.get_active() else 'off'}"))
         ov.add(self.lock_row)
         self.size_row = self.scale_row("Tamanho", None, 90, 640, 5, 190, self.on_size, lambda v: f"{int(v)} px")
@@ -1275,11 +1317,16 @@ class Central(Adw.ApplicationWindow):
         reset.connect("clicked", self.on_reset_colors)
         page.add(colors)
 
-        panel = Adw.PreferencesGroup(title="Painel",
-                                     description="O miniaplicativo Foco fica em Configurações do COSMIC → "
-                                                 "Área de trabalho → Painel → Miniaplicativos.")
-        panel.add(self.switch_row("Ícone na bandeja do sistema", "Dispensável com o miniaplicativo no painel.",
-                                  ("appearance", "tray_icon")))
+        if "COSMIC" in DESKTOP:
+            panel = Adw.PreferencesGroup(title="Painel",
+                                         description="O miniaplicativo Foco fica em Configurações do COSMIC → "
+                                                     "Área de trabalho → Painel → Miniaplicativos.")
+            tray_hint = "Dispensável com o miniaplicativo no painel."
+        else:
+            panel = Adw.PreferencesGroup(title="Bandeja")
+            tray_hint = ("No GNOME aparece com a extensão AppIndicator (o Ubuntu já traz)."
+                         if "GNOME" in DESKTOP else "O anel com o tempo, perto do relógio.")
+        panel.add(self.switch_row("Ícone na bandeja do sistema", tray_hint, ("appearance", "tray_icon")))
         page.add(panel)
         return page
 
@@ -1392,13 +1439,11 @@ class Central(Adw.ApplicationWindow):
         page.add(g)
 
         sysg = Adw.PreferencesGroup(title="Sistema")
-        auto = Adw.SwitchRow(title="Iniciar com o sistema", subtitle="Liga o Foco quando você entra na sessão.")
+        auto = Adw.SwitchRow(title="Iniciar com o sistema", subtitle=autostart_hint())
         auto.set_active(AUTOSTART.exists())
         auto.connect("notify::active", self.on_autostart)
         sysg.add(auto)
-        keys = Adw.ActionRow(title="Atalho de teclado",
-                             subtitle="Em Configurações → Teclado → Atalhos personalizados, crie um atalho com o comando "
-                                      "“foco toggle” (inicia/pausa). Também existem foco skip, foco show e foco hide.")
+        keys = Adw.ActionRow(title="Atalho de teclado", subtitle=shortcut_hint())
         keys.set_subtitle_lines(0)
         sysg.add(keys)
         sysg.add(self.button_row("Desligar o Foco", "Fecha o overlay e para o timer até você ligar de novo.",
@@ -1470,4 +1515,11 @@ class App(Adw.Application):
 
 
 if __name__ == "__main__":
+    if problem := too_old():
+        print(f"foco-settings: {problem}", file=sys.stderr)
+        try:
+            Gio.Subprocess.new(["notify-send", "-a", "Foco", "-i", "foco", "Foco", problem], Gio.SubprocessFlags.NONE)
+        except GLib.Error:
+            pass
+        sys.exit(1)
     sys.exit(App().run(sys.argv))

@@ -41,6 +41,7 @@ pub const HELP: &str = "\
 uso: foco [comando]
 
 sem comando        inicia o Foco (overlay + bandeja)
+open               liga o Foco se preciso e abre a central
 toggle             inicia/pausa
 start | pause      inicia ou continua / pausa
 skip               pula para a próxima etapa
@@ -52,7 +53,7 @@ overlay [on|off]   alterna o overlay
 lock [on|off]      trava o overlay (cliques atravessam)
 size <px>          tamanho do overlay
 output <nome>      monitor do overlay (ex.: DP-1)
-settings           abre as configurações
+settings           abre a central
 status [--json]    estado atual
 reload             relê a configuração
 quit               encerra";

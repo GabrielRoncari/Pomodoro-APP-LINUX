@@ -1,40 +1,25 @@
-//! Laço principal: overlay em layer-shell (Wayland), timer, bandeja, socket e bloqueio.
+//! Laço principal: timer, overlay, bandeja, socket e bloqueio.
+//!
+//! O overlay sai por um de dois caminhos: layer-shell no Wayland (`wl.rs`: COSMIC, KDE, Hyprland,
+//! Sway…) ou uma janela X11 sempre por cima (`x11.rs`: GNOME pelo Xwayland e sessões X11). O resto
+//! (timer, mouse, desenho) é o mesmo para os dois.
 
 use std::os::unix::net::UnixListener;
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant, SystemTime};
 
 use smithay_client_toolkit::{
-    activation::{ActivationHandler, ActivationState, RequestData},
-    compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
-    delegate_registry,
-    dispatch2::Dispatch2,
-    output::{OutputHandler, OutputState},
-    reexports::{
-        calloop::{
-            EventLoop, LoopHandle, RegistrationToken,
-            channel,
-            signals::{Signal, Signals},
-            timer::{TimeoutAction, Timer},
-        },
-        calloop_wayland_source::WaylandSource,
-        client::{
-            Connection, QueueHandle,
-            globals::registry_queue_init,
-            protocol::{wl_callback, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
-        },
+    reexports::calloop::{
+        EventLoop, LoopHandle, RegistrationToken,
+        channel,
+        signals::{Signal, Signals},
+        timer::{TimeoutAction, Timer},
     },
-    registry::{ProvidesRegistryState, RegistryState},
-    registry_handlers,
-    seat::{
-        Capability, SeatHandler, SeatState,
-        pointer::{BTN_LEFT, BTN_RIGHT, CursorIcon, PointerEvent, PointerEventKind, PointerHandler, ThemeSpec, ThemedPointer},
-    },
+    seat::pointer::CursorIcon,
     shell::{
         WaylandSurface,
-        wlr_layer::{Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure},
+        wlr_layer::{Layer, LayerSurface},
     },
-    shm::{Shm, ShmHandler, slot::SlotPool},
 };
 use tiny_skia::Pixmap;
 
@@ -46,11 +31,16 @@ use crate::render::{self, Geo, Hit, View};
 use crate::stats::Stats;
 use crate::timer::{Phase, Run, RunKind, format_clock, now_ms};
 use crate::tray::{FRAC_STEPS, FocoTray, Snap};
+use crate::{wl, x11};
 
 const HOVER_SECS: f32 = 0.16;
 const FLASH_SECS: f32 = 1.8;
+/// Botões com os códigos do evdev (os do Wayland); os do X11 são traduzidos para eles.
+pub const BTN_LEFT: u32 = 0x110;
+pub const BTN_RIGHT: u32 = 0x111;
+pub const BTN_MIDDLE: u32 = 0x112;
 
-struct Press {
+pub struct Press {
     button: u32,
     pos: (f64, f64),
     target: Hit,
@@ -58,79 +48,75 @@ struct Press {
     size0: u32,
 }
 
-struct Overlay {
-    layer: LayerSurface,
-    serial: u64,
-    configured: bool,
+pub enum Surf {
+    Wl(LayerSurface),
+    X(x11::Win),
+}
+
+pub struct Overlay {
+    pub surf: Surf,
+    pub serial: u64,
+    pub configured: bool,
     /// Tamanho (lógico) do buffer atual.
-    size: u32,
+    pub size: u32,
     /// Tamanho pedido mais recente; vira `size` no próximo configure.
-    want_size: u32,
-    size_pending: bool,
-    scale: i32,
-    output_name: String,
+    pub want_size: u32,
+    pub size_pending: bool,
+    pub scale: i32,
+    pub output_name: String,
     /// Margens (esquerda, topo) já enviadas.
-    margin: (i32, i32),
-    want_margin: (i32, i32),
-    /// Margens que o compositor já aplicou (confirmado por wl_display.sync).
-    effective: (i32, i32),
-    margin_inflight: bool,
-    frame_pending: bool,
-    dirty: bool,
-    hover: bool,
-    hot: Hit,
-    press: Option<Press>,
-    region_for: Option<(u32, bool)>,
-    pix: Option<Pixmap>,
-    cursor: Option<CursorIcon>,
+    pub margin: (i32, i32),
+    pub want_margin: (i32, i32),
+    /// Margens que a tela já aplicou: as coordenadas do mouse são relativas a elas.
+    pub effective: (i32, i32),
+    pub margin_inflight: bool,
+    pub frame_pending: bool,
+    pub dirty: bool,
+    pub hover: bool,
+    pub hot: Hit,
+    pub press: Option<Press>,
+    pub region_for: Option<(u32, bool)>,
+    pub pix: Option<Pixmap>,
+    pub cursor: Option<CursorIcon>,
 }
 
-/// Confirma que o compositor aplicou uma margem: a partir daí as coordenadas do mouse
-/// são relativas à nova posição. É isso que deixa o arrasto sem tremedeira.
-struct MarginSync {
-    serial: u64,
-    margin: (i32, i32),
+/// Um monitor, em pixels lógicos.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Output {
+    pub name: String,
+    pub pos: (i32, i32),
+    pub size: (i32, i32),
+    pub primary: bool,
 }
 
-impl Dispatch2<wl_callback::WlCallback, App> for MarginSync {
-    fn event(
-        &self,
-        app: &mut App,
-        _: &wl_callback::WlCallback,
-        event: wl_callback::Event,
-        _: &Connection,
-        _: &QueueHandle<App>,
-    ) {
-        if let wl_callback::Event::Done { .. } = event {
-            if let Some(ov) = app.ov.as_mut().filter(|ov| ov.serial == self.serial) {
-                ov.effective = self.margin;
-                ov.margin_inflight = false;
-            }
-            app.flush_margin();
-        }
-    }
+/// Evento do mouse sobre o overlay, já sem o sotaque de cada protocolo.
+pub enum Ptr {
+    Enter,
+    Leave,
+    Motion,
+    Press(u32),
+    /// Botão e serial (Wayland) ou horário (X11) do clique, para a ativação da central.
+    Release(u32, u32),
+    /// Passos da roda; positivo = para baixo.
+    Scroll(f64),
+}
+
+pub enum Disp {
+    Wl(Box<wl::Wl>),
+    X(Box<x11::X11>),
+    /// Sem onde desenhar (nem layer-shell nem X11): timer, bandeja, central e bloqueio seguem.
+    Nenhum,
 }
 
 pub struct App {
-    conn: Connection,
-    qh: QueueHandle<App>,
-    lh: LoopHandle<'static, App>,
-    registry: RegistryState,
-    seats: SeatState,
-    outputs: OutputState,
-    compositor: CompositorState,
-    layer_shell: LayerShell,
-    shm: Shm,
-    pool: Option<SlotPool>,
-    pointer: Option<ThemedPointer>,
-    seat: Option<wl_seat::WlSeat>,
-    activation: Option<ActivationState>,
-    ov: Option<Overlay>,
+    pub lh: LoopHandle<'static, App>,
+    pub disp: Disp,
+    pub ov: Option<Overlay>,
     ov_serial: u64,
 
     cfg: Config,
     cfg_mtime: Option<SystemTime>,
-    p: Persist,
+    pub p: Persist,
     stats: Stats,
     blocker: Blocker,
     warned_block_missing: bool,
@@ -140,11 +126,13 @@ pub struct App {
     tray: Option<ksni::blocking::Handle<FocoTray>>,
     tray_snap: Snap,
     tick: Option<RegistrationToken>,
+    /// X11 não tem frame callback: as animações andam num timer.
+    anim_tick: Option<RegistrationToken>,
 
     hover_t: f32,
     flash_t: f32,
     last_anim: Option<Instant>,
-    exit: bool,
+    pub exit: bool,
 }
 
 fn mtime(path: &std::path::Path) -> Option<SystemTime> {
@@ -152,15 +140,27 @@ fn mtime(path: &std::path::Path) -> Option<SystemTime> {
 }
 
 pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
-    let conn = Connection::connect_to_env().map_err(|e| format!("sem conexão Wayland: {e}"))?;
-    let (globals, mut queue) = registry_queue_init::<App>(&conn)?;
-    let qh = queue.handle();
     let mut event_loop: EventLoop<'static, App> = EventLoop::try_new()?;
     let lh = event_loop.handle();
 
-    let compositor = CompositorState::bind(&globals, &qh)?;
-    let layer_shell = LayerShell::bind(&globals, &qh).map_err(|_| "o compositor não suporta layer-shell")?;
-    let shm = Shm::bind(&globals, &qh)?;
+    // layer-shell quando o compositor tem; senão uma janela X11, que no GNOME vai pelo Xwayland
+    let (disp, wl_queue) = match wl::Wl::connect() {
+        Ok((w, queue)) => (Disp::Wl(Box::new(w)), Some(queue)),
+        Err(why_wl) => match x11::X11::connect() {
+            Ok(x) => {
+                config::log(&format!("overlay pelo X11 ({why_wl})"));
+                (Disp::X(Box::new(x)), None)
+            }
+            Err(why_x) => {
+                config::log(&format!("sem overlay: {why_wl}; X11: {why_x}"));
+                notify::notify(
+                    "Foco sem o círculo na tela",
+                    "Esta sessão não deixa desenhar o overlay. O timer, a bandeja e a central funcionam.",
+                );
+                (Disp::Nenhum, None)
+            }
+        },
+    };
 
     let (tx, rx) = channel::channel::<Msg>();
     lh.insert_source(rx, |ev, _, app| {
@@ -182,19 +182,8 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = Config::load();
     let mut app = App {
-        conn: conn.clone(),
-        qh: qh.clone(),
         lh: lh.clone(),
-        registry: RegistryState::new(&globals),
-        seats: SeatState::new(&globals, &qh),
-        outputs: OutputState::new(&globals, &qh),
-        compositor,
-        layer_shell,
-        shm,
-        pool: None,
-        pointer: None,
-        seat: None,
-        activation: ActivationState::bind(&globals, &qh).ok(),
+        disp,
         ov: None,
         ov_serial: 0,
         cfg_mtime: mtime(&config::config_path()),
@@ -208,16 +197,23 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
         tray: None,
         tray_snap: Snap::default(),
         tick: None,
+        anim_tick: None,
         hover_t: 0.0,
         flash_t: 0.0,
         last_anim: None,
         exit: false,
     };
 
-    // nomes e tamanhos dos monitores chegam em eventos: espera por eles antes do overlay
-    queue.roundtrip(&mut app)?;
-    queue.roundtrip(&mut app)?;
-    WaylandSource::new(conn, queue).insert(lh)?;
+    match wl_queue {
+        Some(mut queue) => {
+            // nomes e tamanhos dos monitores chegam em eventos: espera por eles antes do overlay
+            queue.roundtrip(&mut app)?;
+            queue.roundtrip(&mut app)?;
+            let conn = app.wl().conn.clone();
+            wl::insert_source(conn, queue, &lh)?;
+        }
+        None => x11::insert_source(&app, &lh)?,
+    }
 
     app.sync_tray();
     app.startup();
@@ -226,9 +222,14 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
         if app.exit {
             break Ok(());
         }
-        match std::panic::catch_unwind(AssertUnwindSafe(|| event_loop.dispatch(None, &mut app))) {
+        let step = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            event_loop.dispatch(None, &mut app)?;
+            x11::pump(&mut app);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        }));
+        match step {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => break Err(e.into()),
+            Ok(Err(e)) => break Err(e),
             Err(_) => break Err("pânico no laço principal".into()),
         }
     };
@@ -237,6 +238,13 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 impl App {
+    pub fn wl(&mut self) -> &mut wl::Wl {
+        match &mut self.disp {
+            Disp::Wl(w) => w,
+            _ => unreachable!("evento Wayland sem conexão Wayland"),
+        }
+    }
+
     fn startup(&mut self) {
         let now = now_ms();
         // o timer acabou enquanto o Foco estava fechado: volta ao início da etapa
@@ -307,7 +315,7 @@ impl App {
             Cmd::Phase(ph) => self.p.timer.go_to(ph),
             Cmd::Overlay(v) => {
                 self.p.ui.visible = v.unwrap_or(!self.p.ui.visible);
-                if self.p.ui.visible { self.show_overlay() } else { self.ov = None }
+                if self.p.ui.visible { self.show_overlay() } else { self.hide_overlay() }
             }
             Cmd::Lock(v) => {
                 self.p.ui.locked = v.unwrap_or(!self.p.ui.locked);
@@ -325,7 +333,7 @@ impl App {
                 self.p.ui.output = name;
                 self.p.ui.positioned = false;
                 if self.p.ui.visible {
-                    self.ov = None;
+                    self.hide_overlay();
                     self.show_overlay();
                 }
             }
@@ -390,6 +398,7 @@ impl App {
                 "output": self.p.ui.output,
             },
             "outputs": self.output_names(),
+            "backend": match self.disp { Disp::Wl(_) => "wayland", Disp::X(_) => "x11", Disp::Nenhum => "nenhum" },
             "today": { "count": count, "minutes": minutes },
         })
     }
@@ -404,10 +413,10 @@ impl App {
             self.cfg.strict_mode = true;
         }
         if old.appearance.above_fullscreen != self.cfg.appearance.above_fullscreen
-            && let Some(ov) = &self.ov
+            && let Some(Overlay { surf: Surf::Wl(layer), .. }) = &self.ov
         {
-            ov.layer.set_layer(self.layer_kind());
-            ov.layer.commit();
+            layer.set_layer(self.layer_kind());
+            layer.commit();
         }
         self.sync_tray();
     }
@@ -416,22 +425,15 @@ impl App {
         notify::open_settings(None, &[]);
     }
 
-    /// Clique no overlay: abre a central (ou fecha, se ela já está na frente). Com um token
-    /// de ativação a janela ganha o foco mesmo se já estava aberta atrás de outras.
+    /// Clique no overlay: abre a central (ou fecha, se ela já está na frente).
     fn open_central(&self, serial: u32) {
-        let (Some(act), Some(seat), Some(ov)) = (&self.activation, &self.seat, &self.ov) else {
-            notify::open_settings(None, &["toggle"]);
-            return;
-        };
-        act.request_token(
-            &self.qh,
-            RequestData {
-                app_id: Some("dev.foco.Settings".into()),
-                seat_and_serial: Some((seat.clone(), serial)),
-                surface: Some(ov.layer.wl_surface().clone()),
-                udata: (),
-            },
-        );
+        match (&self.disp, &self.ov) {
+            (Disp::Wl(w), Some(Overlay { surf: Surf::Wl(layer), .. })) => w.open_central(layer, serial),
+            (Disp::X(_), _) => x11::open_central(serial),
+            _ => {
+                notify::open_settings(None, &["toggle"]);
+            }
+        }
     }
 
     // ---------- timer ----------
@@ -472,6 +474,7 @@ impl App {
             self.reload_config();
             self.sync_block();
         }
+        self.keep_on_top();
         self.request_redraw();
         self.refresh_tray();
         self.schedule_tick();
@@ -542,7 +545,7 @@ impl App {
                 self.warned_block_missing = true;
                 notify::notify(
                     "Bloqueio de sites não instalado",
-                    "Abra as configurações do Foco → Bloqueio e clique em Instalar (pede a senha uma vez).",
+                    "Abra a central do Foco → Sites bloqueados e clique em Instalar (pede a senha uma vez).",
                 );
             }
             return;
@@ -604,7 +607,7 @@ impl App {
         }
     }
 
-    fn refresh_tray(&mut self) {
+    pub fn refresh_tray(&mut self) {
         let snap = self.snapshot();
         if snap == self.tray_snap {
             return;
@@ -627,32 +630,37 @@ impl App {
         })
     }
 
-    fn layer_kind(&self) -> Layer {
+    pub fn layer_kind(&self) -> Layer {
         if self.cfg.appearance.above_fullscreen { Layer::Overlay } else { Layer::Top }
     }
 
+    pub fn outputs(&self) -> Vec<Output> {
+        match &self.disp {
+            Disp::Wl(w) => w.outputs(),
+            Disp::X(x) => x.outputs.clone(),
+            Disp::Nenhum => Vec::new(),
+        }
+    }
+
     fn output_names(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.outputs.outputs().filter_map(|o| self.outputs.info(&o)?.name).collect();
+        let mut v: Vec<String> = self.outputs().into_iter().map(|o| o.name).collect();
         v.sort();
         v
     }
 
-    fn output_by_name(&self, name: &str) -> Option<(wl_output::WlOutput, (i32, i32))> {
+    fn output_by_name(&self, name: &str) -> Option<Output> {
         if name.is_empty() {
             return None;
         }
-        self.outputs.outputs().find_map(|o| {
-            let info = self.outputs.info(&o)?;
-            (info.name.as_deref() == Some(name)).then(|| (o.clone(), info.logical_size.unwrap_or((1920, 1080))))
-        })
+        self.outputs().into_iter().find(|o| o.name == name)
     }
 
-    fn output_size(&self) -> Option<(i32, i32)> {
+    pub fn output_size(&self) -> Option<(i32, i32)> {
         let name = self.ov.as_ref().map(|o| o.output_name.as_str()).unwrap_or(&self.p.ui.output);
-        self.output_by_name(name).map(|(_, size)| size)
+        self.output_by_name(name).map(|o| o.size)
     }
 
-    fn clamp_margin(&self, (x, y): (i32, i32), size: u32) -> (i32, i32) {
+    pub fn clamp_margin(&self, (x, y): (i32, i32), size: u32) -> (i32, i32) {
         match self.output_size() {
             Some((w, h)) => {
                 let s = size as i32;
@@ -662,54 +670,63 @@ impl App {
         }
     }
 
-    fn default_position(out: (i32, i32), size: u32) -> (i32, i32) {
+    pub fn default_position(out: (i32, i32), size: u32) -> (i32, i32) {
         (out.0 - size as i32 - 28, 64)
     }
 
-    fn show_overlay(&mut self) {
-        if self.ov.is_some() {
+    pub fn show_overlay(&mut self) {
+        if self.ov.is_some() || matches!(self.disp, Disp::Nenhum) {
             return;
         }
         let size = self.p.ui.size.clamp(MIN_SIZE, MAX_SIZE);
-        let output = self.output_by_name(&self.p.ui.output);
-        let output_name = if output.is_some() { self.p.ui.output.clone() } else { String::new() };
-        if let Some((_, out)) = &output
+        let mut output = self.output_by_name(&self.p.ui.output);
+        if output.is_none() && matches!(self.disp, Disp::X(_)) {
+            // no Wayland o compositor escolhe o monitor; no X11 a escolha é nossa: o principal
+            let outputs = self.outputs();
+            output = outputs.iter().find(|o| o.primary).or(outputs.first()).cloned();
+            self.p.ui.output = output.as_ref().map(|o| o.name.clone()).unwrap_or_default();
+        }
+        let output_name = output.as_ref().map(|o| o.name.clone()).unwrap_or_default();
+        if let Some(out) = &output
             && !self.p.ui.positioned
         {
-            (self.p.ui.x, self.p.ui.y) = Self::default_position(*out, size);
+            (self.p.ui.x, self.p.ui.y) = Self::default_position(out.size, size);
             self.p.ui.positioned = true;
         }
         let mut margin = (self.p.ui.x, self.p.ui.y);
-        if let Some((_, (w, h))) = &output {
+        if let Some(Output { size: (w, h), .. }) = &output {
             margin = (margin.0.clamp(0, (w - size as i32).max(0)), margin.1.clamp(0, (h - size as i32).max(0)));
         } else if !self.p.ui.positioned {
             margin = (80, 80);
         }
 
-        let surface = self.compositor.create_surface(&self.qh);
-        let layer = self.layer_shell.create_layer_surface(
-            &self.qh,
-            surface,
-            self.layer_kind(),
-            Some("foco"),
-            output.as_ref().map(|(o, _)| o),
-        );
-        layer.set_anchor(Anchor::TOP | Anchor::LEFT);
-        layer.set_exclusive_zone(-1);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        layer.set_size(size, size);
-        layer.set_margin(margin.1, 0, 0, margin.0);
-        layer.commit();
+        let layer = self.layer_kind();
+        let (surf, scale) = match &mut self.disp {
+            Disp::Wl(w) => (Surf::Wl(w.create_layer(size, margin, &output_name, layer)), 1),
+            Disp::X(x) => {
+                let origin = output.as_ref().map(|o| o.pos).unwrap_or((0, 0));
+                match x.create(size, (origin.0 + margin.0, origin.1 + margin.1)) {
+                    Ok(win) => (Surf::X(win), x.scale),
+                    Err(e) => {
+                        config::log(&format!("overlay X11: {e}"));
+                        return;
+                    }
+                }
+            }
+            Disp::Nenhum => return,
+        };
+        // a janela X11 já nasce com tamanho e lugar; a layer espera o configure
+        let configured = matches!(surf, Surf::X(_));
 
         self.ov_serial += 1;
         self.ov = Some(Overlay {
-            layer,
+            surf,
             serial: self.ov_serial,
-            configured: false,
+            configured,
             size,
             want_size: size,
             size_pending: false,
-            scale: 1,
+            scale,
             output_name,
             margin,
             want_margin: margin,
@@ -725,9 +742,28 @@ impl App {
             cursor: None,
         });
         self.hover_t = 0.0;
+        self.draw();
     }
 
-    fn request_redraw(&mut self) {
+    /// X11: volta o círculo para o topo se alguma janela o cobriu. Com "por cima de tela cheia"
+    /// desligado, deixa uma janela em tela cheia ficar na frente.
+    pub fn keep_on_top(&mut self) {
+        let above_fullscreen = self.cfg.appearance.above_fullscreen;
+        if let (Disp::X(x), Some(Overlay { surf: Surf::X(win), .. })) = (&mut self.disp, &self.ov)
+            && (above_fullscreen || !x.fullscreen_active())
+        {
+            x.raise(win);
+        }
+    }
+
+    pub fn hide_overlay(&mut self) {
+        let Some(ov) = self.ov.take() else { return };
+        if let (Surf::X(win), Disp::X(x)) = (&ov.surf, &self.disp) {
+            x.destroy(win);
+        }
+    }
+
+    pub fn request_redraw(&mut self) {
         if let Some(ov) = self.ov.as_mut() {
             ov.dirty = true;
         }
@@ -787,7 +823,7 @@ impl App {
         }
     }
 
-    fn draw(&mut self) {
+    pub fn draw(&mut self) {
         if self.ov.as_ref().is_none_or(|o| !o.configured || o.frame_pending) {
             return;
         }
@@ -804,66 +840,43 @@ impl App {
             return;
         }
 
-        let scale = ov.scale.max(1);
-        let px = ov.size as i32 * scale;
-        let pool = match &mut self.pool {
-            Some(p) => p,
-            None => match SlotPool::new((px * px * 4) as usize, &self.shm) {
-                Ok(p) => self.pool.insert(p),
-                Err(e) => {
-                    eprintln!("foco: sem memória compartilhada: {e}");
-                    return;
-                }
-            },
-        };
-        let (buffer, canvas) = match pool.create_buffer(px, px, px * 4, wl_shm::Format::Argb8888) {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("foco: buffer: {e}");
-                return;
-            }
-        };
-        if ov.pix.as_ref().is_none_or(|p| p.width() != px as u32) {
-            ov.pix = Pixmap::new(px as u32, px as u32);
+        let px = (ov.size as i32 * ov.scale.max(1)) as u32;
+        if ov.pix.as_ref().is_none_or(|p| p.width() != px) {
+            ov.pix = Pixmap::new(px, px);
         }
         let Some(pix) = ov.pix.as_mut() else { return };
         render::draw_overlay(pix, &view);
-        render::blit_argb(pix, canvas, opacity);
-
-        let surface = ov.layer.wl_surface();
-        if ov.region_for != Some((ov.size, locked)) {
-            if let Ok(region) = Region::new(&self.compositor) {
-                if !locked {
-                    for (x, y, w, h) in Geo::new(ov.size as f32).input_rects(ov.size as i32) {
-                        region.add(x, y, w, h);
-                    }
-                }
-                surface.set_input_region(Some(region.wl_region()));
-                ov.region_for = Some((ov.size, locked));
-            }
+        match &mut self.disp {
+            Disp::Wl(w) => w.present(ov, opacity, locked),
+            Disp::X(x) => x.present(ov, opacity, locked),
+            Disp::Nenhum => {}
         }
-        surface.set_buffer_scale(scale);
-        surface.damage_buffer(0, 0, px, px);
-        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-        ov.frame_pending = true;
         ov.dirty = false;
-        if let Err(e) = buffer.attach_to(surface) {
-            eprintln!("foco: attach: {e}");
+
+        if animating && matches!(self.disp, Disp::X(_)) && self.anim_tick.is_none() {
+            self.anim_tick = self
+                .lh
+                .insert_source(Timer::from_duration(Duration::from_millis(16)), |_, _, app| {
+                    app.anim_tick = None;
+                    app.draw();
+                    TimeoutAction::Drop
+                })
+                .ok();
         }
-        ov.layer.commit();
     }
 
     /// Envia a margem desejada se não houver outra esperando confirmação.
-    fn flush_margin(&mut self) {
+    pub fn flush_margin(&mut self) {
         let Some(ov) = self.ov.as_mut() else { return };
         if ov.margin_inflight || ov.want_margin == ov.margin {
             return;
         }
         ov.margin = ov.want_margin;
-        ov.layer.set_margin(ov.margin.1, 0, 0, ov.margin.0);
-        ov.layer.commit();
-        ov.margin_inflight = true;
-        self.conn.display().sync(&self.qh, MarginSync { serial: ov.serial, margin: ov.margin });
+        match &mut self.disp {
+            Disp::Wl(w) => w.send_margin(ov),
+            Disp::X(x) => x.place(ov),
+            Disp::Nenhum => {}
+        }
     }
 
     /// Muda o tamanho; com `keep_center` o círculo cresce em volta do próprio centro.
@@ -892,21 +905,23 @@ impl App {
         self.flush_size();
     }
 
-    fn flush_size(&mut self) {
+    pub fn flush_size(&mut self) {
         let Some(ov) = self.ov.as_mut() else { return };
         if ov.size_pending || ov.want_size == ov.size {
             return;
         }
-        ov.layer.set_size(ov.want_size, ov.want_size);
-        ov.size_pending = true;
-        if !ov.margin_inflight && ov.want_margin != ov.margin {
-            ov.margin = ov.want_margin;
-            ov.layer.set_margin(ov.margin.1, 0, 0, ov.margin.0);
-            ov.margin_inflight = true;
-            ov.layer.commit();
-            self.conn.display().sync(&self.qh, MarginSync { serial: ov.serial, margin: ov.margin });
-        } else {
-            ov.layer.commit();
+        match &mut self.disp {
+            Disp::Wl(w) => w.send_size(ov),
+            Disp::X(x) => {
+                // no X11 o tamanho vale na hora
+                ov.size = ov.want_size;
+                ov.margin = ov.want_margin;
+                ov.region_for = None;
+                ov.dirty = true;
+                x.place(ov);
+                self.draw();
+            }
+            Disp::Nenhum => {}
         }
     }
 
@@ -916,8 +931,10 @@ impl App {
             return;
         }
         ov.cursor = Some(icon);
-        if let Some(p) = &self.pointer {
-            let _ = p.set_cursor(&self.conn, icon);
+        match &self.disp {
+            Disp::Wl(w) => w.set_cursor(icon),
+            Disp::X(x) => x.set_cursor(ov, icon),
+            Disp::Nenhum => {}
         }
     }
 
@@ -930,15 +947,12 @@ impl App {
         }
     }
 
-    fn on_pointer(&mut self, ev: &PointerEvent) {
+    /// Mouse sobre o overlay, em coordenadas lógicas da superfície.
+    pub fn on_pointer(&mut self, ev: Ptr, x: f64, y: f64) {
         let Some(ov) = self.ov.as_mut() else { return };
-        if &ev.surface != ov.layer.wl_surface() {
-            return;
-        }
-        let (x, y) = ev.position;
         let geo = Geo::new(ov.size as f32);
-        match ev.kind {
-            PointerEventKind::Enter { .. } => {
+        match ev {
+            Ptr::Enter => {
                 ov.hover = true;
                 ov.cursor = None;
                 ov.hot = geo.hit(x as f32, y as f32);
@@ -946,14 +960,14 @@ impl App {
                 self.set_cursor(icon);
                 self.request_redraw();
             }
-            PointerEventKind::Leave { .. } => {
+            Ptr::Leave => {
                 if ov.press.is_none() {
                     ov.hover = false;
                     ov.hot = Hit::None;
                     self.request_redraw();
                 }
             }
-            PointerEventKind::Motion { .. } => {
+            Ptr::Motion => {
                 if let Some(press) = ov.press.as_mut() {
                     if press.button != BTN_LEFT {
                         return;
@@ -991,14 +1005,14 @@ impl App {
                     }
                 }
             }
-            PointerEventKind::Press { button, .. } => {
+            Ptr::Press(button) => {
                 if ov.press.is_none() {
                     let target = geo.hit(x as f32, y as f32);
                     ov.press = Some(Press { button, pos: (x, y), target, dragging: false, size0: ov.want_size });
                     self.request_redraw();
                 }
             }
-            PointerEventKind::Release { button, serial, .. } => {
+            Ptr::Release(button, serial) => {
                 let Some(press) = ov.press.take_if(|p| p.button == button) else { return };
                 let inside = geo.hit(x as f32, y as f32);
                 ov.hot = inside;
@@ -1023,14 +1037,7 @@ impl App {
                     self.open_central(serial);
                 }
             }
-            PointerEventKind::Axis { vertical, .. } => {
-                let steps = if vertical.value120 != 0 {
-                    vertical.value120 as f64 / 120.0
-                } else if vertical.discrete != 0 {
-                    vertical.discrete as f64
-                } else {
-                    vertical.absolute / 12.0
-                };
+            Ptr::Scroll(steps) => {
                 if steps.abs() > f64::EPSILON {
                     let size = (ov.want_size as f64 * 1.07f64.powf(-steps)).round() as u32;
                     self.resize(size, true);
@@ -1039,180 +1046,32 @@ impl App {
             }
         }
     }
+
+    /// Os monitores mudaram: mantém o círculo dentro da tela (ou recria, se o dele sumiu).
+    pub fn outputs_changed(&mut self) {
+        if let Some(ov) = self.ov.as_ref() {
+            let gone = !ov.output_name.is_empty() && self.output_by_name(&ov.output_name).is_none();
+            if gone && matches!(self.disp, Disp::X(_)) {
+                self.hide_overlay();
+                self.p.ui.output.clear();
+                self.p.ui.positioned = false;
+                if self.p.ui.visible {
+                    self.show_overlay();
+                }
+            } else {
+                let m = self.clamp_margin(ov.want_margin, ov.want_size);
+                if let Some(ov) = self.ov.as_mut() {
+                    ov.want_margin = m;
+                    // reposiciona mesmo sem mudar a margem: a origem do monitor pode ter mudado
+                    ov.margin = (i32::MIN, i32::MIN);
+                }
+                self.flush_margin();
+            }
+        }
+        self.refresh_tray();
+    }
 }
 
 fn geo_frac() -> f32 {
     Geo::new(1.0).grip_frac
 }
-
-// ---------- Wayland ----------
-
-impl CompositorHandler for App {
-    fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, factor: i32) {
-        if let Some(ov) = self.ov.as_mut().filter(|o| o.layer.wl_surface() == surface) {
-            ov.scale = factor.max(1);
-            ov.dirty = true;
-        }
-        self.draw();
-    }
-
-    fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
-
-    fn frame(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, _: u32) {
-        if let Some(ov) = self.ov.as_mut().filter(|o| o.layer.wl_surface() == surface) {
-            ov.frame_pending = false;
-        }
-        self.draw();
-    }
-
-    fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, surface: &wl_surface::WlSurface, output: &wl_output::WlOutput) {
-        let Some(name) = self.outputs.info(output).and_then(|i| i.name) else { return };
-        let Some(ov) = self.ov.as_mut().filter(|o| o.layer.wl_surface() == surface) else { return };
-        if !ov.output_name.is_empty() {
-            return;
-        }
-        // overlay criado sem monitor definido: adota o que o compositor escolheu
-        ov.output_name = name.clone();
-        self.p.ui.output = name;
-        if !self.p.ui.positioned
-            && let Some(out) = self.output_size()
-        {
-            let size = self.ov.as_ref().map(|o| o.want_size).unwrap_or(self.p.ui.size);
-            let m = Self::default_position(out, size);
-            (self.p.ui.x, self.p.ui.y) = m;
-            self.p.ui.positioned = true;
-            if let Some(ov) = self.ov.as_mut() {
-                ov.want_margin = m;
-            }
-            self.flush_margin();
-        }
-        self.p.save();
-        self.refresh_tray();
-    }
-
-    fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
-}
-
-impl OutputHandler for App {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.outputs
-    }
-
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        self.refresh_tray();
-    }
-
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        // resolução/rotação mudou: mantém o círculo dentro da tela
-        if let Some(ov) = self.ov.as_ref() {
-            let m = self.clamp_margin(ov.want_margin, ov.want_size);
-            if let Some(ov) = self.ov.as_mut() {
-                ov.want_margin = m;
-            }
-            self.flush_margin();
-        }
-        self.refresh_tray();
-    }
-
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
-        self.refresh_tray();
-    }
-}
-
-impl LayerShellHandler for App {
-    fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, layer: &LayerSurface) {
-        if self.ov.as_ref().is_some_and(|o| o.layer.wl_surface() == layer.wl_surface()) {
-            // o monitor sumiu: recria no monitor que o compositor escolher
-            self.ov = None;
-            self.p.ui.output.clear();
-            self.p.ui.positioned = false;
-            if self.p.ui.visible {
-                self.show_overlay();
-            }
-        }
-    }
-
-    fn configure(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        layer: &LayerSurface,
-        configure: LayerSurfaceConfigure,
-        _: u32,
-    ) {
-        let Some(ov) = self.ov.as_mut().filter(|o| o.layer.wl_surface() == layer.wl_surface()) else { return };
-        let w = configure.new_size.0;
-        let new_size = if w > 0 { w } else { ov.want_size };
-        if new_size != ov.size {
-            ov.region_for = None;
-        }
-        ov.size = new_size;
-        ov.size_pending = false;
-        ov.configured = true;
-        ov.dirty = true;
-        // um configure novo pede um buffer novo já, sem esperar o frame
-        ov.frame_pending = false;
-        self.draw();
-        self.flush_size();
-    }
-}
-
-impl SeatHandler for App {
-    fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seats
-    }
-
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
-
-    fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            self.seat = Some(seat.clone());
-            let surface = self.compositor.create_surface(qh);
-            match self.seats.get_pointer_with_theme::<_, ()>(qh, &seat, self.shm.wl_shm(), surface, ThemeSpec::default()) {
-                Ok(p) => self.pointer = Some(p),
-                Err(e) => eprintln!("foco: sem ponteiro: {e}"),
-            }
-        }
-    }
-
-    fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
-        if capability == Capability::Pointer {
-            self.pointer = None;
-        }
-    }
-
-    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
-}
-
-impl PointerHandler for App {
-    fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
-        for ev in events {
-            self.on_pointer(ev);
-        }
-    }
-}
-
-impl ActivationHandler for App {
-    type RequestUdata = ();
-
-    fn new_token(&mut self, token: String, _: &RequestData<()>) {
-        notify::open_settings(Some(&token), &["toggle"]);
-    }
-}
-
-impl ShmHandler for App {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
-    }
-}
-
-delegate_registry!(App);
-
-impl ProvidesRegistryState for App {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry
-    }
-    registry_handlers![OutputState, SeatState];
-}
-
-smithay_client_toolkit::delegate_dispatch2!(App);

@@ -42,6 +42,18 @@ pub fn sound(name: &str, volume: f32) {
 /// Abre a central do Foco (instalada ao lado do binário, ou no repositório). O token de
 /// ativação, quando há, deixa a janela vir para a frente já com o foco.
 pub fn open_settings(token: Option<&str>, args: &[&str]) -> bool {
+    match token {
+        Some(t) => spawn_central(&[("XDG_ACTIVATION_TOKEN", t), ("DESKTOP_STARTUP_ID", t)], args),
+        None => spawn_central(&[], args),
+    }
+}
+
+/// Numa sessão X11: o id de startup com o horário do clique deixa o gerenciador dar o foco.
+pub fn open_settings_x11(startup_id: &str, args: &[&str]) -> bool {
+    spawn_central(&[("DESKTOP_STARTUP_ID", startup_id)], args)
+}
+
+fn spawn_central(env: &[(&str, &str)], args: &[&str]) -> bool {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(p) = std::env::var_os("FOCO_SETTINGS") {
         candidates.push(PathBuf::from(p));
@@ -55,10 +67,7 @@ pub fn open_settings(token: Option<&str>, args: &[&str]) -> bool {
     match candidates.into_iter().find(|p| p.exists()) {
         Some(path) => {
             let mut cmd = Command::new(path);
-            cmd.args(args);
-            if let Some(t) = token {
-                cmd.env("XDG_ACTIVATION_TOKEN", t).env("DESKTOP_STARTUP_ID", t);
-            }
+            cmd.args(args).envs(env.iter().copied());
             spawn_detached(cmd)
         }
         None => {

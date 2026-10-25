@@ -7,6 +7,8 @@ mod render;
 mod stats;
 mod timer;
 mod tray;
+mod wl;
+mod x11;
 
 use std::os::unix::net::{UnixListener, UnixStream};
 
@@ -73,6 +75,8 @@ fn main() {
         Some("-V" | "--version") => println!("foco {}", env!("CARGO_PKG_VERSION")),
         // abre direto, mesmo com o daemon parado
         Some("settings") => std::process::exit(if notify::open_settings(None, &[]) { 0 } else { 1 }),
+        // o ícone do menu de aplicativos: liga o Foco se precisar e abre a central
+        Some("open") => std::process::exit(open()),
         Some("preview") => {
             let out = args.get(1).cloned().unwrap_or_else(|| "preview.png".into());
             let size = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(220);
@@ -80,6 +84,23 @@ fn main() {
         }
         Some(_) => std::process::exit(ipc::client(&args)),
     }
+}
+
+fn open() -> i32 {
+    // só confere se está rodando: quem escondeu o overlay não quer ele de volta por abrir a central
+    if ipc::request("status").is_err() {
+        let started = std::env::current_exe().ok().is_some_and(|exe| {
+            use std::os::unix::process::CommandExt;
+            let mut cmd = std::process::Command::new(exe);
+            // grupo próprio: fechar quem chamou não derruba o daemon
+            cmd.process_group(0);
+            notify::spawn_detached(cmd)
+        });
+        if !started {
+            eprintln!("não consegui ligar o Foco");
+        }
+    }
+    if notify::open_settings(None, &[]) { 0 } else { 1 }
 }
 
 fn daemon() -> i32 {
