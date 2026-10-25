@@ -29,9 +29,6 @@ pub enum Hit {
     #[default]
     None,
     Body,
-    Reset,
-    Toggle,
-    Skip,
     Resize,
 }
 
@@ -46,13 +43,11 @@ pub struct View {
     pub every: u32,
     pub color: [u8; 3],
     pub bg_opacity: f32,
-    /// 0..1, animado: controles aparecem conforme sobe.
+    /// 0..1, animado: a alça e o realce aparecem conforme sobe.
     pub hover: f32,
     pub hot: Hit,
-    pub pressed: Hit,
     /// 0..1, pulso quando uma etapa termina.
     pub flash: f32,
-    pub strict: bool,
     pub blocking: bool,
 }
 
@@ -63,9 +58,6 @@ pub struct Geo {
     pub ring_r: f32,
     pub ring_w: f32,
     pub row_y: f32,
-    pub toggle_r: f32,
-    pub small_r: f32,
-    pub btn_dx: f32,
     pub grip: (f32, f32),
     pub grip_r: f32,
     /// Distância (em cada eixo) do canto superior esquerdo até a alça, como fração do tamanho.
@@ -85,33 +77,19 @@ impl Geo {
             ring_r,
             ring_w,
             row_y: c + size * 0.19,
-            toggle_r: size * 0.07,
-            small_r: size * 0.053,
-            btn_dx: size * 0.158,
             grip: (c + g, c + g),
             grip_r: size * 0.043,
             grip_frac: (c + g) / size,
         }
     }
 
-    pub fn hit(&self, x: f32, y: f32, controls: bool, strict: bool) -> Hit {
+    pub fn hit(&self, x: f32, y: f32) -> Hit {
         let d = |px: f32, py: f32| ((x - px).powi(2) + (y - py).powi(2)).sqrt();
-        if controls && d(self.grip.0, self.grip.1) <= self.grip_r * 1.6 {
+        if d(self.grip.0, self.grip.1) <= self.grip_r * 1.6 {
             return Hit::Resize;
         }
         if d(self.c, self.c) > self.r {
             return Hit::None;
-        }
-        if controls && !strict {
-            if d(self.c, self.row_y) <= self.toggle_r * 1.3 {
-                return Hit::Toggle;
-            }
-            if d(self.c - self.btn_dx, self.row_y) <= self.small_r * 1.45 {
-                return Hit::Reset;
-            }
-            if d(self.c + self.btn_dx, self.row_y) <= self.small_r * 1.45 {
-                return Hit::Skip;
-            }
         }
         Hit::Body
     }
@@ -315,57 +293,6 @@ fn draw_text(pix: &mut Pixmap, t: &Text, color: Color) {
     }
 }
 
-fn play_icon(cx: f32, cy: f32, r: f32) -> Option<Path> {
-    let mut pb = PathBuilder::new();
-    pb.move_to(cx - r * 0.36, cy - r * 0.56);
-    pb.line_to(cx + r * 0.6, cy);
-    pb.line_to(cx - r * 0.36, cy + r * 0.56);
-    pb.close();
-    pb.finish()
-}
-
-fn pause_icon(pix: &mut Pixmap, cx: f32, cy: f32, r: f32, paint: &Paint) {
-    let (w, h, gap) = (r * 0.3, r * 1.04, r * 0.26);
-    for x in [cx - gap / 2.0 - w, cx + gap / 2.0] {
-        if let Some(p) = rounded_rect(x, cy - h / 2.0, w, h, w * 0.3) {
-            fill(pix, &p, paint);
-        }
-    }
-}
-
-fn skip_icon(pix: &mut Pixmap, cx: f32, cy: f32, r: f32, paint: &Paint) {
-    let mut pb = PathBuilder::new();
-    pb.move_to(cx - r * 0.5, cy - r * 0.5);
-    pb.line_to(cx + r * 0.22, cy);
-    pb.line_to(cx - r * 0.5, cy + r * 0.5);
-    pb.close();
-    if let Some(p) = pb.finish() {
-        fill(pix, &p, paint);
-    }
-    if let Some(p) = rounded_rect(cx + r * 0.26, cy - r * 0.5, r * 0.2, r * 1.0, r * 0.06) {
-        fill(pix, &p, paint);
-    }
-}
-
-fn reset_icon(pix: &mut Pixmap, cx: f32, cy: f32, r: f32, paint: &Paint) {
-    let a = r * 0.5;
-    let start = -PI / 2.0;
-    if let Some(p) = arc(cx, cy, a, start, TAU * 0.78) {
-        stroke(pix, &p, paint, r * 0.17, true);
-    }
-    // ponta da seta no topo, apontando para a esquerda (sentido anti-horário)
-    let (tx, ty) = (cx, cy - a);
-    let h = r * 0.3;
-    let mut pb = PathBuilder::new();
-    pb.move_to(tx - h, ty);
-    pb.line_to(tx + h * 0.35, ty - h * 0.95);
-    pb.line_to(tx + h * 0.35, ty + h * 0.95);
-    pb.close();
-    if let Some(p) = pb.finish() {
-        fill(pix, &p, paint);
-    }
-}
-
 fn lock_icon(pix: &mut Pixmap, cx: f32, cy: f32, h: f32, paint: &Paint) {
     let w = h * 0.8;
     let body_top = cy - h * 0.08;
@@ -523,65 +450,29 @@ pub fn draw_overlay(pix: &mut Pixmap, v: &View) {
     let clock_alpha = if v.run == RunKind::Paused { 0.62 } else { 0.97 };
     draw_text(pix, &clock, rgba(WHITE, clock_alpha));
 
-    // linha de baixo: rótulo da etapa, que dá lugar aos controles no hover
-    let label_alpha = 1.0 - v.hover;
-    if label_alpha > 0.01 {
-        let label = match v.run {
-            RunKind::Paused => "PAUSADO",
-            _ => v.phase.label(),
-        };
-        let lf = medium();
-        let lpx = s * 0.058;
-        let lbase = g.row_y + cap_height(lf, lpx) / 2.0;
-        let lc = mix(col, WHITE, 0.18);
-        let a = label_alpha * if v.run == RunKind::Paused { 0.7 } else { 0.95 };
-        let t = text(lf, label, lpx, c, lbase, 0.16, false);
-        draw_text(pix, &t, rgba(lc, a));
-        if v.blocking {
-            let lh = lpx * 1.05;
-            lock_icon(pix, c - t.width / 2.0 - lh * 0.9, g.row_y, lh, &solid(rgba(lc, a * 0.85)));
-        }
+    // linha de baixo: rótulo da etapa
+    let label = match v.run {
+        RunKind::Paused => "PAUSADO",
+        _ => v.phase.label(),
+    };
+    let lf = medium();
+    let lpx = s * 0.058;
+    let lbase = g.row_y + cap_height(lf, lpx) / 2.0;
+    let lc = mix(col, WHITE, 0.18);
+    let a = if v.run == RunKind::Paused { 0.7 } else { 0.95 };
+    let t = text(lf, label, lpx, c, lbase, 0.16, false);
+    draw_text(pix, &t, rgba(lc, a));
+    if v.blocking {
+        let lh = lpx * 1.05;
+        lock_icon(pix, c - t.width / 2.0 - lh * 0.9, g.row_y, lh, &solid(rgba(lc, a * 0.85)));
     }
 
+    // com o mouse em cima: borda acesa (clique abre a central) e alça de redimensionar
     let ca = v.hover;
     if ca > 0.01 {
-        if v.strict {
-            let lh = s * 0.075;
-            lock_icon(pix, c, g.row_y, lh, &solid(rgba(mix(col, WHITE, 0.2), ca * 0.9)));
-        } else {
-            let buttons = [
-                (Hit::Reset, c - g.btn_dx, g.small_r),
-                (Hit::Toggle, c, g.toggle_r),
-                (Hit::Skip, c + g.btn_dx, g.small_r),
-            ];
-            for (hit, x, r) in buttons {
-                let hot = v.hot == hit;
-                let pressed = v.pressed == hit && hot;
-                let bg_color = if hit == Hit::Toggle {
-                    let base = if hot { mix(col, WHITE, 0.15) } else { col };
-                    rgba(if pressed { mix(col, BLACK, 0.15) } else { base }, ca * 0.95)
-                } else {
-                    rgba(WHITE, ca * if pressed { 0.24 } else if hot { 0.16 } else { 0.08 })
-                };
-                if let Some(p) = circle(x, g.row_y, r) {
-                    fill(pix, &p, &solid(bg_color));
-                }
-                let icon = solid(rgba(WHITE, ca * 0.95));
-                match hit {
-                    Hit::Toggle if v.run == RunKind::Running => pause_icon(pix, x, g.row_y, r * 0.78, &icon),
-                    Hit::Toggle => {
-                        if let Some(p) = play_icon(x + r * 0.06, g.row_y, r * 0.8) {
-                            fill(pix, &p, &icon);
-                        }
-                    }
-                    Hit::Skip => skip_icon(pix, x, g.row_y, r * 0.82, &icon),
-                    Hit::Reset => reset_icon(pix, x, g.row_y, r * 0.95, &icon),
-                    _ => {}
-                }
-            }
+        if let Some(p) = circle(c, c, g.r - s * 0.004) {
+            stroke(pix, &p, &solid(rgba(mix(col, WHITE, 0.25), ca * 0.32)), (s * 0.008).max(1.0), false);
         }
-
-        // alça de redimensionar
         let (gx, gy) = g.grip;
         let hot = v.hot == Hit::Resize;
         if let Some(p) = circle(gx, gy, g.grip_r) {

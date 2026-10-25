@@ -25,19 +25,17 @@ fn preview(out: &str, size: u32) {
         bg_opacity: 0.86,
         hover: 0.0,
         hot: Hit::None,
-        pressed: Hit::None,
         flash: 0.0,
-        strict: false,
         blocking: true,
     };
     let variants = vec![
         View { run: RunKind::Idle, clock: "25:00".into(), fraction: 1.0, done_in_cycle: 0, blocking: false, ..base.clone() },
         base.clone(),
-        View { hover: 1.0, hot: Hit::Toggle, ..base.clone() },
+        View { hover: 1.0, hot: Hit::Body, ..base.clone() },
         View { run: RunKind::Paused, hover: 1.0, hot: Hit::Resize, ..base.clone() },
         View { phase: Phase::ShortBreak, clock: "03:12".into(), fraction: 0.64, color: config::parse_color("#3fd8a0"), blocking: false, done_in_cycle: 2, ..base.clone() },
         View { phase: Phase::LongBreak, clock: "11:05".into(), fraction: 0.2, color: config::parse_color("#62a8ff"), blocking: false, done_in_cycle: 4, ..base.clone() },
-        View { strict: true, hover: 1.0, fraction: 0.05, clock: "01:15".into(), ..base.clone() },
+        View { hover: 1.0, fraction: 0.05, clock: "01:15".into(), ..base.clone() },
         View { flash: 0.8, ..base.clone() },
     ];
     let cols = 4u32;
@@ -74,7 +72,7 @@ fn main() {
         Some("-h" | "--help" | "help") => println!("{}", ipc::HELP),
         Some("-V" | "--version") => println!("foco {}", env!("CARGO_PKG_VERSION")),
         // abre direto, mesmo com o daemon parado
-        Some("settings") => std::process::exit(if notify::open_settings() { 0 } else { 1 }),
+        Some("settings") => std::process::exit(if notify::open_settings(None, &[]) { 0 } else { 1 }),
         Some("preview") => {
             let out = args.get(1).cloned().unwrap_or_else(|| "preview.png".into());
             let size = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(220);

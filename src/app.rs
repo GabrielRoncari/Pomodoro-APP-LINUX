@@ -5,6 +5,7 @@ use std::panic::AssertUnwindSafe;
 use std::time::{Duration, Instant, SystemTime};
 
 use smithay_client_toolkit::{
+    activation::{ActivationHandler, ActivationState, RequestData},
     compositor::{CompositorHandler, CompositorState, FrameCallbackData, Region},
     delegate_registry,
     dispatch2::Dispatch2,
@@ -122,6 +123,8 @@ pub struct App {
     shm: Shm,
     pool: Option<SlotPool>,
     pointer: Option<ThemedPointer>,
+    seat: Option<wl_seat::WlSeat>,
+    activation: Option<ActivationState>,
     ov: Option<Overlay>,
     ov_serial: u64,
 
@@ -131,6 +134,8 @@ pub struct App {
     stats: Stats,
     blocker: Blocker,
     warned_block_missing: bool,
+    /// O modo rígido foi desligado durante um foco travado; a config é relida quando ele acabar.
+    strict_hold: bool,
     tx: channel::Sender<Msg>,
     tray: Option<ksni::blocking::Handle<FocoTray>>,
     tray_snap: Snap,
@@ -188,6 +193,8 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
         shm,
         pool: None,
         pointer: None,
+        seat: None,
+        activation: ActivationState::bind(&globals, &qh).ok(),
         ov: None,
         ov_serial: 0,
         cfg_mtime: mtime(&config::config_path()),
@@ -196,6 +203,7 @@ pub fn run(listener: UnixListener) -> Result<(), Box<dyn std::error::Error>> {
         stats: Stats::load(),
         blocker,
         warned_block_missing: false,
+        strict_hold: false,
         tx,
         tray: None,
         tray_snap: Snap::default(),
@@ -344,6 +352,9 @@ impl App {
 
     /// Depois de qualquer mudança de estado: salva, bloqueia/libera, redesenha.
     fn after_change(&mut self) {
+        if self.strict_hold && !self.p.timer.strict_locked(&self.cfg) {
+            self.reload_config();
+        }
         self.p.save();
         self.sync_block();
         self.schedule_tick();
@@ -385,7 +396,13 @@ impl App {
 
     fn reload_config(&mut self) {
         self.cfg_mtime = mtime(&config::config_path());
+        let strict = self.p.timer.strict_locked(&self.cfg);
         let old = std::mem::replace(&mut self.cfg, Config::load());
+        // desligar o modo rígido no meio do foco só vale quando ele acabar
+        self.strict_hold = strict && !self.cfg.strict_mode;
+        if self.strict_hold {
+            self.cfg.strict_mode = true;
+        }
         if old.appearance.above_fullscreen != self.cfg.appearance.above_fullscreen
             && let Some(ov) = &self.ov
         {
@@ -396,7 +413,25 @@ impl App {
     }
 
     fn open_settings(&self) {
-        notify::open_settings();
+        notify::open_settings(None, &[]);
+    }
+
+    /// Clique no overlay: abre a central (ou fecha, se ela já está na frente). Com um token
+    /// de ativação a janela ganha o foco mesmo se já estava aberta atrás de outras.
+    fn open_central(&self, serial: u32) {
+        let (Some(act), Some(seat), Some(ov)) = (&self.activation, &self.seat, &self.ov) else {
+            notify::open_settings(None, &["toggle"]);
+            return;
+        };
+        act.request_token(
+            &self.qh,
+            RequestData {
+                app_id: Some("dev.foco.Settings".into()),
+                seat_and_serial: Some((seat.clone(), serial)),
+                surface: Some(ov.layer.wl_surface().clone()),
+                udata: (),
+            },
+        );
     }
 
     // ---------- timer ----------
@@ -747,9 +782,7 @@ impl App {
             bg_opacity: self.cfg.appearance.background_opacity,
             hover: h * h * (3.0 - 2.0 * h),
             hot: ov.map(|o| o.hot).unwrap_or_default(),
-            pressed: ov.and_then(|o| o.press.as_ref()).map(|p| p.target).unwrap_or_default(),
             flash,
-            strict: t.strict_locked(&self.cfg),
             blocking: self.blocker.active(),
         }
     }
@@ -892,13 +925,12 @@ impl App {
         match hit {
             _ if dragging => CursorIcon::Grabbing,
             Hit::Resize => CursorIcon::NwseResize,
-            Hit::Toggle | Hit::Reset | Hit::Skip => CursorIcon::Pointer,
-            _ => CursorIcon::Grab,
+            Hit::Body => CursorIcon::Pointer,
+            Hit::None => CursorIcon::Default,
         }
     }
 
     fn on_pointer(&mut self, ev: &PointerEvent) {
-        let strict = self.p.timer.strict_locked(&self.cfg);
         let Some(ov) = self.ov.as_mut() else { return };
         if &ev.surface != ov.layer.wl_surface() {
             return;
@@ -909,7 +941,7 @@ impl App {
             PointerEventKind::Enter { .. } => {
                 ov.hover = true;
                 ov.cursor = None;
-                ov.hot = geo.hit(x as f32, y as f32, true, strict);
+                ov.hot = geo.hit(x as f32, y as f32);
                 let icon = Self::cursor_for(ov.hot, false);
                 self.set_cursor(icon);
                 self.request_redraw();
@@ -951,7 +983,7 @@ impl App {
                         self.flush_margin();
                     }
                 } else {
-                    let hot = geo.hit(x as f32, y as f32, true, strict);
+                    let hot = geo.hit(x as f32, y as f32);
                     if hot != ov.hot {
                         ov.hot = hot;
                         self.set_cursor(Self::cursor_for(hot, false));
@@ -961,14 +993,14 @@ impl App {
             }
             PointerEventKind::Press { button, .. } => {
                 if ov.press.is_none() {
-                    let target = geo.hit(x as f32, y as f32, true, strict);
+                    let target = geo.hit(x as f32, y as f32);
                     ov.press = Some(Press { button, pos: (x, y), target, dragging: false, size0: ov.want_size });
                     self.request_redraw();
                 }
             }
-            PointerEventKind::Release { button, .. } => {
+            PointerEventKind::Release { button, serial, .. } => {
                 let Some(press) = ov.press.take_if(|p| p.button == button) else { return };
-                let inside = geo.hit(x as f32, y as f32, true, strict);
+                let inside = geo.hit(x as f32, y as f32);
                 ov.hot = inside;
                 if inside == Hit::None {
                     ov.hover = false;
@@ -986,23 +1018,9 @@ impl App {
                 if moved {
                     return;
                 }
-                if button == BTN_RIGHT {
-                    self.open_settings();
-                } else if button == BTN_LEFT && inside == press.target {
-                    let cmd = match inside {
-                        Hit::Toggle | Hit::Body => Some(Cmd::Toggle),
-                        Hit::Reset => Some(Cmd::Reset),
-                        Hit::Skip => Some(Cmd::Skip),
-                        _ => None,
-                    };
-                    if let Some(cmd) = cmd {
-                        if strict {
-                            self.flash_t = 0.35;
-                            self.request_redraw();
-                        } else {
-                            self.on_msg(Msg { cmd, reply: None });
-                        }
-                    }
+                // qualquer botão abre a central; iniciar e pausar ficam lá
+                if inside == Hit::Body && press.target == Hit::Body && matches!(button, BTN_LEFT | BTN_RIGHT) {
+                    self.open_central(serial);
                 }
             }
             PointerEventKind::Axis { vertical, .. } => {
@@ -1148,6 +1166,7 @@ impl SeatHandler for App {
 
     fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
         if capability == Capability::Pointer && self.pointer.is_none() {
+            self.seat = Some(seat.clone());
             let surface = self.compositor.create_surface(qh);
             match self.seats.get_pointer_with_theme::<_, ()>(qh, &seat, self.shm.wl_shm(), surface, ThemeSpec::default()) {
                 Ok(p) => self.pointer = Some(p),
@@ -1170,6 +1189,14 @@ impl PointerHandler for App {
         for ev in events {
             self.on_pointer(ev);
         }
+    }
+}
+
+impl ActivationHandler for App {
+    type RequestUdata = ();
+
+    fn new_token(&mut self, token: String, _: &RequestData<()>) {
+        notify::open_settings(Some(&token), &["toggle"]);
     }
 }
 

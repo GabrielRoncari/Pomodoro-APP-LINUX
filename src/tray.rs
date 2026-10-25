@@ -5,6 +5,7 @@ use ksni::{Category, Icon, MenuItem, ToolTip, Tray};
 use smithay_client_toolkit::reexports::calloop::channel::Sender;
 
 use crate::ipc::{Cmd, Msg};
+use crate::notify;
 use crate::render;
 use crate::timer::{Phase, RunKind};
 
@@ -98,8 +99,19 @@ impl Tray for FocoTray {
         ToolTip { title: "Foco".into(), description: self.status_line(), ..Default::default() }
     }
 
+    /// Clique esquerdo abre a central (ou fecha, se ela já está na frente), como no círculo:
+    /// iniciar e pausar ficam lá. O painel costuma mandar um token de ativação logo depois do
+    /// clique; com ele a janela vem para a frente.
     fn activate(&mut self, _x: i32, _y: i32) {
-        self.send(Cmd::Toggle);
+        let mut token = ksni::current_xdg_activation_token();
+        for _ in 0..25 {
+            if token.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+            token = ksni::current_xdg_activation_token();
+        }
+        notify::open_settings(token.as_deref(), &["toggle"]);
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
@@ -195,7 +207,7 @@ impl Tray for FocoTray {
         }
         menu.extend([
             MenuItem::Separator,
-            item("Configurações…", true, Cmd::Settings),
+            item("Abrir a central…", true, Cmd::Settings),
             item("Sair", true, Cmd::Quit),
         ]);
         menu

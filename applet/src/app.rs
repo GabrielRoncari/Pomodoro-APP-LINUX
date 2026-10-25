@@ -203,7 +203,7 @@ impl Foco {
                 container(button::suggested("Iniciar o Foco").on_press(Message::StartDaemon)).center_x(Length::Fill)
             ),
             padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
-            menu_button(text::body("Configurações…")).on_press(Message::OpenSettings),
+            menu_button(text::body("Abrir a central do Foco…")).on_press(Message::OpenSettings),
         ]
         .padding([8, 0])
         .into()
@@ -298,7 +298,7 @@ impl Foco {
                     .on_toggle(|v| Message::Send(format!("lock {}", on_off(v)))),
             ),
             padded_control(divider::horizontal::default()).padding([space_xxs, space_s]),
-            menu_button(text::body("Configurações…")).on_press(Message::OpenSettings),
+            menu_button(text::body("Abrir a central do Foco…")).on_press(Message::OpenSettings),
         ]
         .padding([8, 0])
         .into()

@@ -1,17 +1,21 @@
 # Foco
 
 Pomodoro para o COSMIC (Pop!_OS 24.04, Wayland): um timer circular flutuante que fica por
-cima de tudo, um ícone na bandeja e bloqueio de sites durante o foco.
+cima de tudo, uma central com os controles e as configurações, um miniaplicativo no painel e
+bloqueio de sites durante o foco.
 
 - **Overlay circular** em layer-shell: sempre visível (até sobre tela cheia, se quiser), não
   rouba o foco do teclado, aparece em todas as áreas de trabalho.
   - arraste para mover · roda do mouse ou a alça ↘ para redimensionar
-  - clique para iniciar/pausar · passe o mouse para ver reiniciar / iniciar-pausar / pular
-  - botão direito abre as configurações
+  - clique (qualquer botão) abre a central; clicar de novo fecha
   - opção de travar (os cliques atravessam) e de escolher o monitor
+- **Central**: o timer grande com iniciar/pausar, recomeçar, pular e as etapas, atalhos para o
+  bloqueio, o modo rígido e o círculo, o resumo do dia e todas as configurações. Ao iniciar, ela
+  sai da frente; Esc também fecha. O fundo é uma imagem sua (Círculo e aparência → Fundo desta
+  janela) ou um vermelho.
 - **Miniaplicativo do painel**: anel de progresso e o tempo que falta no painel do COSMIC; o
-  clique abre os controles (iniciar/pausar, pular, etapas, overlay, configurações).
-- **Bandeja** (opcional, desligável em Aparência → Painel): o mesmo anel, com um menu.
+  clique abre os controles rápidos (iniciar/pausar, pular, etapas, overlay) e a central.
+- **Bandeja** (opcional, desligável em Círculo e aparência → Painel): o mesmo anel, com um menu.
 - **Bloqueio de sites** durante o foco, em qualquer navegador. Nas pausas tudo volta.
   Abas que já estavam abertas são cortadas na hora.
 - **Modo rígido**: durante o foco não dá para pausar, pular nem liberar sites.
@@ -30,8 +34,8 @@ O miniaplicativo (`applet/`, feito com o libcosmic) leva alguns minutos para com
 vez. Para pô-lo no painel: Configurações do COSMIC → Área de trabalho → Painel → Miniaplicativos →
 Adicionar → **Foco**. Ele só mostra e controla: o timer continua no daemon `foco`.
 
-O **bloqueio de sites** precisa de um helper root, instalado uma vez: abra as configurações
-(botão direito no círculo, ou `foco settings`) → **Bloqueio** → **Instalar**. A senha é pedida
+O **bloqueio de sites** precisa de um helper root, instalado uma vez: abra a central
+(clique no círculo, ou `foco settings`) → **Sites bloqueados** → **Instalar**. A senha é pedida
 só nessa hora; depois o Foco bloqueia e libera sozinho.
 
 ## Linha de comando
@@ -43,7 +47,7 @@ foco skip | reset | reset-cycle
 foco phase focus|short|long
 foco show | hide | lock on|off | size 220 | output DP-1
 foco status [--json]
-foco settings
+foco settings        # abre a central
 foco quit
 ```
 
@@ -64,7 +68,8 @@ configurado à mão num navegador podem passar por cima.
 
 | | |
 |---|---|
-| `~/.config/foco/config.json` | preferências (quem escreve é a tela de configurações) |
+| `~/.config/foco/config.json` | preferências (quem escreve é a central) |
+| `~/.local/share/foco/fundo-*.jpg` | cópia reduzida da imagem de fundo da central |
 | `~/.local/state/foco/state.json` | timer e posição do overlay (quem escreve é o daemon) |
 | `~/.local/share/foco/history.jsonl` | focos concluídos |
 | `~/.local/state/foco/foco.log` | início, fim e erros do daemon |
@@ -81,7 +86,8 @@ configurado à mão num navegador podem passar por cima.
 - `src/` — daemon em Rust: `app.rs` (laço, overlay Wayland, mouse), `render.rs` (desenho com
   tiny-skia), `tray.rs` (StatusNotifierItem), `timer.rs`, `blocker.rs`, `ipc.rs`
 - `applet/` — miniaplicativo do painel (libcosmic), conversa com o daemon pelo socket
-- `settings/foco-settings.py` — configurações em GTK4 + libadwaita
+- `settings/foco-settings.py` — a central, em GTK4 + libadwaita (o mostrador é desenhado com
+  caminhos do Gsk, sem cairo)
 - `system/` — helper root, política do polkit e instalador do bloqueio
 
 Fontes Fira Sans embutidas (SIL Open Font License).

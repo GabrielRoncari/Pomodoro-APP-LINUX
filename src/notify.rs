@@ -39,8 +39,9 @@ pub fn sound(name: &str, volume: f32) {
     }
 }
 
-/// Abre a tela de configurações (instalada ao lado do binário, ou no repositório).
-pub fn open_settings() -> bool {
+/// Abre a central do Foco (instalada ao lado do binário, ou no repositório). O token de
+/// ativação, quando há, deixa a janela vir para a frente já com o foco.
+pub fn open_settings(token: Option<&str>, args: &[&str]) -> bool {
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Some(p) = std::env::var_os("FOCO_SETTINGS") {
         candidates.push(PathBuf::from(p));
@@ -52,7 +53,14 @@ pub fn open_settings() -> bool {
     }
     candidates.push(crate::config::home().join(".local/bin/foco-settings"));
     match candidates.into_iter().find(|p| p.exists()) {
-        Some(path) => spawn_detached(Command::new(path)),
+        Some(path) => {
+            let mut cmd = Command::new(path);
+            cmd.args(args);
+            if let Some(t) = token {
+                cmd.env("XDG_ACTIVATION_TOKEN", t).env("DESKTOP_STARTUP_ID", t);
+            }
+            spawn_detached(cmd)
+        }
         None => {
             notify("Foco", "Não achei o foco-settings. Rode o install.sh de novo.");
             false
