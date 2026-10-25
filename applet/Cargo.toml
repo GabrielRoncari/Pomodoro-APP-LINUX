@@ -3,6 +3,8 @@ name = "foco-applet"
 version = "0.1.0"
 edition = "2024"
 description = "Miniaplicativo do Foco para o painel do COSMIC"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/GabrielRoncari/Pomodoro-APP-LINUX"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

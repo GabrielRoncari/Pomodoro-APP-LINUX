@@ -19,7 +19,9 @@ if [[ -x applet/target/release/foco-applet ]]; then
 fi
 cp settings/foco-settings.py "$out/settings/"
 cp -r system data install.sh uninstall.sh README.md "$out/"
-[[ -e LICENSE ]] && cp LICENSE "$out/"
+cp LICENSE "$out/"
+# as fontes Fira Sans vão embutidas no binário: a licença delas vai junto
+cp assets/OFL.txt "$out/OFL-FiraSans.txt"
 find "$out" -name __pycache__ -prune -exec rm -rf {} +
 
 tar -C dist -czf "dist/$name.tar.gz" "$name"

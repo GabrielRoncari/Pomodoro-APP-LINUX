@@ -34,7 +34,7 @@ No GNOME, sem bandeja, o Foco abre pelo menu de aplicativos ou clicando no círc
 ## Instalar
 
 ```sh
-git clone <este repositório> foco && cd foco
+git clone https://github.com/GabrielRoncari/Pomodoro-APP-LINUX.git foco && cd foco
 ./install.sh
 ```
 
@@ -120,4 +120,7 @@ configurado à mão num navegador podem passar por cima.
 - `system/` — helper root, política do polkit e instalador do bloqueio
 - `scripts/dist.sh` — gera o pacote de release com binários prontos
 
-Fontes Fira Sans embutidas (SIL Open Font License).
+## Licença
+
+GPL-3.0 ou posterior (veja `LICENSE`). As fontes Fira Sans embutidas em `assets/` são da Mozilla,
+sob a SIL Open Font License 1.1 (`assets/OFL.txt`).

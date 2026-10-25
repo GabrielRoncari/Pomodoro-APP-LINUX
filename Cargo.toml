@@ -3,7 +3,9 @@ name = "foco"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "Pomodoro com overlay circular, bandeja e bloqueio de sites (COSMIC/Wayland)"
+description = "Pomodoro para Linux com overlay circular, central e bloqueio de sites"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/GabrielRoncari/Pomodoro-APP-LINUX"
 
 [dependencies]
 smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"] }
