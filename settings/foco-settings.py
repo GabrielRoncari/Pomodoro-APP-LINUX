@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 """Central do Foco (GTK4 + libadwaita): o timer, os controles e todas as configurações.
 
-Abre com um clique no círculo da tela ou pelo miniaplicativo do painel. Grava
+Abre com um clique no overlay (o timer flutuante), na bandeja ou pelo miniaplicativo do painel. Grava
 ~/.config/foco/config.json e avisa o daemon pelo socket; o que é do overlay (visível, travado,
 tamanho, monitor) vai direto por comando, porque o daemon é o dono.
 """
@@ -90,7 +90,7 @@ PHASES = [("focus", "Foco"), ("short_break", "Pausa curta"), ("long_break", "Pau
 PAGES = {
     "timer": ("Tempos e ciclo", "alarm-symbolic"),
     "block": ("Sites bloqueados", "action-unavailable-symbolic"),
-    "look": ("Círculo e aparência", "preferences-desktop-appearance-symbolic"),
+    "look": ("Overlay e aparência", "preferences-desktop-appearance-symbolic"),
     "alerts": ("Alertas e sistema", "preferences-system-notifications-symbolic"),
 }
 
@@ -156,6 +156,16 @@ window.foco { background-color: #170807; }
 .foco .phases button:hover { background-color: alpha(#ffffff, 0.07); }
 .foco .phases button:checked { background-color: @foco_phase; color: #ffffff; }
 .foco .phases button:disabled { filter: none; opacity: 0.55; }
+
+.foco button.chip {
+  min-height: 34px; padding: 0 16px; border-radius: 999px; font-weight: 600;
+  background-color: alpha(#1c0807, 0.6); color: alpha(#fff2ec, 0.8);
+  box-shadow: inset 0 0 0 1px alpha(#ffe0d4, 0.14);
+}
+.foco button.chip:hover { background-color: alpha(#2c0f0d, 0.72); }
+.foco button.chip:checked { background-color: alpha(@foco_phase, 0.28); color: #ffffff;
+  box-shadow: inset 0 0 0 1px alpha(@foco_light, 0.7); }
+.foco button.chip:disabled { filter: none; opacity: 0.5; }
 
 .foco .notice {
   padding: 9px 16px; border-radius: 14px; background-color: alpha(#1c0807, 0.66);
@@ -724,12 +734,21 @@ class Central(Adw.ApplicationWindow):
             self.phases.append(b)
             self.phase_buttons[key] = b
 
+        self.overlay_icon = Gtk.Image(icon_name="view-reveal-symbolic")
+        self.overlay_label = Gtk.Label(label="Overlay")
+        inner = Gtk.Box(spacing=8)
+        inner.append(self.overlay_icon)
+        inner.append(self.overlay_label)
+        self.overlay_btn = Gtk.ToggleButton(child=inner, halign=Gtk.Align.CENTER, margin_top=14, css_classes=["chip"],
+                                            tooltip_text="Mostra ou esconde o overlay (o timer flutuante)")
+        self.overlay_btn.connect("notify::active", self.on_visible)
+
         self.notice = Gtk.Label(wrap=True, justify=Gtk.Justification.CENTER, max_width_chars=42,
                                 halign=Gtk.Align.CENTER, margin_top=18, css_classes=["notice"], visible=False)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.CENTER, halign=Gtk.Align.CENTER,
                       margin_start=28, margin_end=28, margin_top=28, margin_bottom=28, css_classes=["hero"])
-        for w in (dial, controls, self.phases, self.notice):
+        for w in (dial, controls, self.phases, self.overlay_btn, self.notice):
             box.append(w)
         # o fundo do lado do timer também arrasta a janela
         return Gtk.WindowHandle(child=box, hexpand=True)
@@ -796,7 +815,7 @@ class Central(Adw.ApplicationWindow):
         if st["state"] == "running":
             self.command("pause")
         elif self.command("start") and not self._close_source:
-            # começou: a central sai da frente, o círculo continua mostrando o tempo
+            # começou: a central sai da frente, o overlay continua mostrando o tempo
             self._close_source = GLib.timeout_add(550, self.close_after_start)
 
     def close_after_start(self):
@@ -854,10 +873,7 @@ class Central(Adw.ApplicationWindow):
         quick = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
         self.block_quick = self.switch_row("Bloquear sites", None, ("block", "enabled"), icon="action-unavailable-symbolic")
         self.strict_quick = self.switch_row("Modo rígido", None, ("strict_mode",), icon="changes-prevent-symbolic")
-        self.visible_quick = Adw.SwitchRow(title="Círculo na tela", subtitle="O timer flutuante; clique nele para abrir aqui.")
-        self.visible_quick.add_prefix(Gtk.Image(icon_name="media-record-symbolic"))
-        self.visible_quick.connect("notify::active", self.on_visible)
-        for row in (self.block_quick, self.strict_quick, self.visible_quick):
+        for row in (self.block_quick, self.strict_quick):
             quick.append(row)
         box.append(quick)
 
@@ -905,17 +921,20 @@ class Central(Adw.ApplicationWindow):
         elif not installed:
             sub = "Falta instalar o bloqueador (em Sites bloqueados)"
         elif st and st.get("blocking"):
-            sub = f"{len(st.get('blocked_sites') or [])} sites fora do ar agora"
+            k = len(st.get("blocked_sites") or [])
+            sub = f"{k} {'site fora' if k == 1 else 'sites fora'} do ar agora"
         else:
-            sub = f"{n} sites saem do ar durante o foco"
+            sub = f"{n} {'site sai' if n == 1 else 'sites saem'} do ar durante o foco"
         self.block_quick.set_subtitle(sub)
         self.block_quick.set_sensitive(not strict)
         self.strict_quick.set_subtitle("Travado até este foco acabar" if strict
                                        else "Sem pausar, pular nem liberar sites até o foco acabar")
         self.strict_quick.set_sensitive(not strict)
-        self.visible_quick.set_sensitive(st is not None)
-        if st:
-            self.visible_quick.set_active(st["overlay"]["visible"])
+        visible = bool(st and st["overlay"]["visible"])
+        self.overlay_btn.set_sensitive(st is not None)
+        self.overlay_btn.set_active(visible)
+        self.overlay_icon.set_from_icon_name("view-reveal-symbolic" if visible else "view-conceal-symbolic")
+        self.overlay_label.set_label("Overlay visível" if visible else "Overlay escondido")
 
     def update_summaries(self):
         c = self.cfg
@@ -923,7 +942,7 @@ class Central(Adw.ApplicationWindow):
             f"Foco de {c['focus_min']} min · pausas de {c['short_break_min']} e {c['long_break_min']} min")
         n = len(c["block"]["sites"])
         self.nav_rows["block"].set_subtitle(f"{n} {'site' if n == 1 else 'sites'} na lista")
-        self.nav_rows["look"].set_subtitle("Fundo desta janela, cores e o círculo na tela")
+        self.nav_rows["look"].set_subtitle("Fundo desta janela, cores e o overlay")
         al = c["alerts"]
         alerts = " e ".join(x for x, on in (("notificação", al["notifications"]), ("som", al["sound"])) if on)
         self.nav_rows["alerts"].set_subtitle((alerts.capitalize() or "Silencioso") + " ao fim de cada etapa")
@@ -1188,7 +1207,7 @@ class Central(Adw.ApplicationWindow):
             self.toast((err or "Falhou").strip().splitlines()[-1])
         GLib.timeout_add(400, self.refresh)
 
-    # ---------- Círculo e aparência ----------
+    # ---------- Overlay e aparência ----------
 
     def build_look_page(self):
         a = self.cfg["appearance"]
@@ -1208,14 +1227,14 @@ class Central(Adw.ApplicationWindow):
         page.add(central)
         self.update_bg_row()
 
-        ov = Adw.PreferencesGroup(title="Círculo na tela",
+        ov = Adw.PreferencesGroup(title="Overlay",
                                   description="Arraste para mover · roda do mouse ou a alça ↘ redimensionam · "
                                               "clique abre esta janela.")
-        self.visible_row = Adw.SwitchRow(title="Mostrar o círculo")
+        self.visible_row = Adw.SwitchRow(title="Mostrar o overlay")
         self.visible_row.connect("notify::active", self.on_visible)
         ov.add(self.visible_row)
         self.lock_row = Adw.SwitchRow(title="Travar posição",
-                                      subtitle="Os cliques atravessam o círculo; abra esta janela pelo painel.")
+                                      subtitle="Os cliques atravessam o overlay; abra esta janela pela bandeja.")
         self.lock_row.connect("notify::active", lambda r, _: self._syncing or ipc(f"lock {'on' if r.get_active() else 'off'}"))
         ov.add(self.lock_row)
         self.size_row = self.scale_row("Tamanho", None, 90, 640, 5, 190, self.on_size, lambda v: f"{int(v)} px")
@@ -1228,11 +1247,11 @@ class Central(Adw.ApplicationWindow):
                                ("appearance", "above_fullscreen")))
         page.add(ov)
 
-        tr = Adw.PreferencesGroup(title="Transparência do círculo")
+        tr = Adw.PreferencesGroup(title="Transparência do overlay")
         tr.add(self.scale_row("Fundo", None, 0, 100, 1, a["background_opacity"] * 100,
                               lambda v: (a.__setitem__("background_opacity", round(v / 100, 2)), self.changed()),
                               lambda v: f"{int(v)}%"))
-        tr.add(self.scale_row("Sem o mouse em cima", "Opacidade do círculo inteiro quando você não está mexendo nele.",
+        tr.add(self.scale_row("Sem o mouse em cima", "Opacidade do overlay inteiro quando você não está mexendo nele.",
                               15, 100, 1, a["idle_opacity"] * 100,
                               lambda v: (a.__setitem__("idle_opacity", round(v / 100, 2)), self.changed()),
                               lambda v: f"{int(v)}%"))
@@ -1382,7 +1401,7 @@ class Central(Adw.ApplicationWindow):
                                       "“foco toggle” (inicia/pausa). Também existem foco skip, foco show e foco hide.")
         keys.set_subtitle_lines(0)
         sysg.add(keys)
-        sysg.add(self.button_row("Desligar o Foco", "Fecha o círculo e para o timer até você ligar de novo.",
+        sysg.add(self.button_row("Desligar o Foco", "Fecha o overlay e para o timer até você ligar de novo.",
                                  "Desligar", self.on_quit, css=["destructive-action"]))
         page.add(sysg)
         return page
@@ -1423,7 +1442,7 @@ class App(Adw.Application):
 
     def do_command_line(self, command_line):
         args = command_line.get_arguments()[1:]
-        # clique no círculo com a central já na frente: fecha, como um menu
+        # clique no overlay ou na bandeja com a central já na frente: fecha, como um menu
         if "toggle" in args and self.window is not None and self.window.is_active():
             self.window.close()
             return 0

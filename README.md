@@ -10,12 +10,12 @@ bloqueio de sites durante o foco.
   - clique (qualquer botão) abre a central; clicar de novo fecha
   - opção de travar (os cliques atravessam) e de escolher o monitor
 - **Central**: o timer grande com iniciar/pausar, recomeçar, pular e as etapas, atalhos para o
-  bloqueio, o modo rígido e o círculo, o resumo do dia e todas as configurações. Ao iniciar, ela
-  sai da frente; Esc também fecha. O fundo é uma imagem sua (Círculo e aparência → Fundo desta
+  bloqueio e o modo rígido, um botão para mostrar/esconder o overlay, o resumo do dia e todas as configurações. Ao iniciar, ela
+  sai da frente; Esc também fecha. O fundo é uma imagem sua (Overlay e aparência → Fundo desta
   janela) ou um vermelho.
 - **Miniaplicativo do painel**: anel de progresso e o tempo que falta no painel do COSMIC; o
   clique abre os controles rápidos (iniciar/pausar, pular, etapas, overlay) e a central.
-- **Bandeja** (opcional, desligável em Círculo e aparência → Painel): o mesmo anel, com um menu.
+- **Bandeja** (opcional, desligável em Overlay e aparência → Painel): o mesmo anel, com um menu.
 - **Bloqueio de sites** durante o foco, em qualquer navegador. Nas pausas tudo volta.
   Abas que já estavam abertas são cortadas na hora.
 - **Modo rígido**: durante o foco não dá para pausar, pular nem liberar sites.
@@ -35,7 +35,7 @@ vez. Para pô-lo no painel: Configurações do COSMIC → Área de trabalho → 
 Adicionar → **Foco**. Ele só mostra e controla: o timer continua no daemon `foco`.
 
 O **bloqueio de sites** precisa de um helper root, instalado uma vez: abra a central
-(clique no círculo, ou `foco settings`) → **Sites bloqueados** → **Instalar**. A senha é pedida
+(clique no overlay, ou `foco settings`) → **Sites bloqueados** → **Instalar**. A senha é pedida
 só nessa hora; depois o Foco bloqueia e libera sozinho.
 
 ## Linha de comando
